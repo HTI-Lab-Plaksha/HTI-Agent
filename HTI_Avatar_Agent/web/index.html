@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Veda — HTI Lab AI Agent | Plaksha University</title>
+  <meta name="description" content="Interactive 3D Avatar for Human-Technology Interaction at HTI Lab, Plaksha University.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+      "talkinghead": "https://cdn.jsdelivr.net/npm/@met4citizen/talkinghead@1.7/dist/talkinghead.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="brand-group">
+        <div class="brand-badge">HTI LAB</div>
+        <div class="brand-text">
+          <h1>Veda <span class="tag">AI Persona</span></h1>
+          <p class="subtitle">Human-Technology Interaction • Plaksha University</p>
+        </div>
+      </div>
+      
+      <div class="header-actions">
+        <button id="btnOpenStudio" class="btn-studio" title="Open 3D Avatar Importer & Studio">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>Import HD Avatar</span>
+        </button>
+
+        <div class="header-status">
+          <span class="status-indicator online"></span>
+          <span class="status-label" id="agentStatus">Agent Ready</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="interaction-grid">
+      <!-- 3D Avatar Viewport -->
+      <section class="avatar-stage-card" id="dropZoneArea">
+        <div id="avatarContainer" class="avatar-viewport">
+          <div id="loadingOverlay" class="loading-overlay">
+            <div class="spinner"></div>
+            <p id="loadingText">Initializing 3D Avatar Engine...</p>
+          </div>
+        </div>
+
+        <!-- Floating Viewport Controls -->
+        <div class="viewport-toolbar">
+          <button id="btnCameraHead" class="tool-btn active" title="Focus Head & Shoulders">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>
+            Portrait
+          </button>
+          <button id="btnCameraBody" class="tool-btn" title="Focus Full Body">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/><path d="M18 22v-6a4 4 0 0 0-8 0v6"/><path d="M14 13h4a2 2 0 0 1 2 2v7"/><path d="M10 13H6a2 2 0 0 0-2 2v7"/></svg>
+            Full Body
+          </button>
+          <button id="btnWave" class="tool-btn highlight" title="Namaste Greeting">
+            🙏 Namaste
+          </button>
+          <button id="btnGestureExplain" class="tool-btn" title="Hand Explaining Gesture">
+            👐 Explain
+          </button>
+          <button id="btnGestureWelcome" class="tool-btn" title="Welcoming Gesture">
+            🤲 Welcome
+          </button>
+          <button id="btnStudioTrigger" class="tool-btn" title="Upload or Create High Definition Avatar">
+            ✨ Studio
+          </button>
+        </div>
+      </section>
+
+      <!-- Agent Dialogue & Interaction Panel -->
+      <section class="dialogue-panel-card">
+        <div class="chat-header">
+          <h2>Conversational Stream</h2>
+          <span class="badge-subtle">Voice & Motion Enabled</span>
+        </div>
+
+        <div id="chatMessages" class="chat-history">
+          <div class="message-bubble agent">
+            <div class="bubble-meta">
+              <span class="sender-name">Veda</span>
+              <span class="timestamp">Just now</span>
+            </div>
+            <p class="bubble-text">Namaste! I am Veda, the conversational 3D persona for the HTI Lab at Plaksha University. How can I assist you today?</p>
+          </div>
+        </div>
+
+        <!-- Chat Input & Speech Trigger -->
+        <form id="chatForm" class="chat-input-bar">
+          <div class="input-wrapper">
+            <input 
+              type="text" 
+              id="userPromptInput" 
+              placeholder="Type a message or sentence for Meera to speak..." 
+              autocomplete="off"
+            />
+          </div>
+          <button type="submit" id="btnSpeak" class="btn-primary">
+            <span>Speak</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4c0 .55.45 1 1 1h3l3.29 3.29c.63.63 1.71.18 1.71-.71V6.41c0-.89-1.08-1.34-1.71-.71L7 9H4c-.55 0-1 .45-1 1zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+          </button>
+        </form>
+
+        <!-- Quick Interaction Actions -->
+        <div class="quick-prompts">
+          <span class="quick-label">Try asking:</span>
+          <button class="chip-btn" data-text="Namaste! Welcome to the Human-Machine Interaction Lab at Plaksha University!">🙏 Namaste Greet</button>
+          <button class="chip-btn" data-text="Our mission at HTI Lab is creating natural, empathetic interactions between humans and AI agents.">HTI Mission</button>
+          <button class="chip-btn" data-text="Let me explain how multimodal speech, gesture synthesis, and ARKit blendshapes work together in real-time.">👐 Explain Technology</button>
+          <button class="chip-btn" data-text="A very warm welcome to everyone visiting our HTI Lab today! We are excited to collaborate with you.">🤲 Warm Welcome</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- HD Avatar Import / Studio Modal -->
+    <div id="studioModal" class="studio-modal hidden">
+      <div class="studio-modal-content">
+        <div class="studio-modal-header">
+          <div class="modal-title-group">
+            <h3>Import High-Definition 3D Avatar (Pixar Quality)</h3>
+            <p>Generate on Avaturn or drop any rigged <code>.glb</code> avatar with ARKit blendshapes</p>
+          </div>
+          <button id="btnCloseStudio" class="btn-close-modal" title="Close">&times;</button>
+        </div>
+
+        <div class="modal-body-container">
+          <!-- Step 1: Open Avaturn Creator -->
+          <div class="action-card">
+            <div class="card-badge">Step 1</div>
+            <h4>Create from Concept Photo</h4>
+            <p>Go to Avaturn, click <strong>Create Avatar</strong>, and upload your generated concept photo: <code>avatar/01_reference/front.png</code>.</p>
+            <a href="https://avaturn.me" target="_blank" rel="noopener noreferrer" class="btn-external">
+              <span>Open Avaturn.me in New Tab</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            </a>
+          </div>
+
+          <!-- Step 2: Drag and drop or browse GLB -->
+          <div class="action-card upload-card" id="modalDropZone">
+            <div class="card-badge">Step 2</div>
+            <h4>Drop Downloaded GLB Here</h4>
+            <p>Once you click Download in Avaturn (or from Sketchfab/Mixamo), drag & drop the <code>.glb</code> file below:</p>
+            
+            <div class="drop-zone-box">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <p class="drop-text">Drag and drop <strong>.glb</strong> file here</p>
+              <span class="or-divider">or</span>
+              <label class="btn-file-select">
+                Browse File
+                <input type="file" id="glbFileInput" accept=".glb,.gltf" style="display: none;">
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="studio-modal-footer">
+          <span class="footer-hint">✨ The new model will instantly replace Meera with full 2048px skin textures, realistic blinking eyes, and mouth lip-sync!</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js?v=3.2"></script>
+</body>
+</html>

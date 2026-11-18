@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+myenv/
+venv/
+ENV/
+env/
+.venv/
+
+# Environment and sensitive credentials
+.env
+*.key
+*.pem
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Temporary files & logs
+*.log
+*.tmp
+temp_*.mp3
+recording.wav
+
+# IDE
+.vscode/
+.idea/
