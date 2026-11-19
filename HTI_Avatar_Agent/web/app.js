@@ -331,7 +331,15 @@ async function loadAnimationClips() {
   const loader = new GLTFLoader();
   const cacheBust = Date.now();
   const animNames = [
-    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` }
+    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` },
+    { key: 'namaste', file: `../final/anims/Namaste.glb?t=${cacheBust}` },
+    { key: 'talking', file: `../final/anims/Talking.glb?t=${cacheBust}` },
+    { key: 'talking_explain', file: `../final/anims/Talking_Explain.glb?t=${cacheBust}` },
+    { key: 'talking_bothhands', file: `../final/anims/Talking_BothHands.glb?t=${cacheBust}` },
+    { key: 'talking_welcome', file: `../final/anims/Talking_Welcome.glb?t=${cacheBust}` },
+    { key: 'thinking', file: `../final/anims/Thinking.glb?t=${cacheBust}` },
+    { key: 'waving', file: `../final/anims/Waving.glb?t=${cacheBust}` },
+    { key: 'thankful', file: `../final/anims/Thankful.glb?t=${cacheBust}` }
   ];
 
   for (const anim of animNames) {
@@ -699,10 +707,31 @@ function playNextAudioInQueue() {
   }
   agentStatus.textContent = "Veda Speaking...";
 
-  // Natural idle posture at all times without distorted arm gestures; warm smile for greetings
+  // Expressive conversational gestures from HTI_Avatar_Agent 2
   const textLower = (item.text || '').toLowerCase();
-  if (textLower.includes('namaste') || textLower.includes('pranam') || textLower.includes('welcome') || textLower.includes('hello') || textLower.includes('swagat') || textLower.startsWith('hi')) {
+  let gestureToPlay = null;
+  if (textLower.includes('namaste') || textLower.includes('pranam')) {
+    gestureToPlay = animations.namaste || animations.waving;
     targetSmile = 0.32;
+  } else if (textLower.includes('welcome') || textLower.includes('swagat') || textLower.includes('hello') || textLower.startsWith('hi')) {
+    gestureToPlay = animations.waving || animations.talking_welcome;
+    targetSmile = 0.28;
+  } else if (textLower.includes('explain') || textLower.includes('research') || textLower.includes('technology') || textLower.includes('demo')) {
+    gestureToPlay = animations.talking_explain;
+  } else {
+    const talkingPool = [
+      animations.talking_explain,
+      animations.talking_bothhands,
+      animations.talking_welcome,
+      animations.talking
+    ].filter(Boolean);
+    if (talkingPool.length > 0) {
+      gestureToPlay = talkingPool[Math.floor(Math.random() * talkingPool.length)];
+    }
+  }
+
+  if (gestureToPlay) {
+    crossFadeToAction(gestureToPlay, 0.25);
   }
 
   if (activeAudioElement) {
@@ -865,7 +894,7 @@ async function speakText(text, gestureKey = null) {
   }
 }
 
-// Facial Expressions, Blinking, and Real-time Lip-Sync Loop
+// Facial Expressions, Blinking, and Lip-Sync Loop (Exact HTI_Avatar_Agent 2 Physics)
 function updateFacialExpressions(delta) {
   if (facialMeshes.length === 0) return;
 
@@ -883,59 +912,53 @@ function updateFacialExpressions(delta) {
       setMorphInfluence('eyeBlinkLeft', 0);
       setMorphInfluence('eyeBlinkRight', 0);
       setMorphInfluence('eyesClosed', 0);
-      setMorphInfluence('blink', 0);
     } else {
       const blinkWeight = Math.sin(blinkProgress * Math.PI);
       setMorphInfluence('eyeBlinkLeft', blinkWeight);
       setMorphInfluence('eyeBlinkRight', blinkWeight);
       setMorphInfluence('eyesClosed', blinkWeight);
-      setMorphInfluence('blink', blinkWeight);
     }
   }
 
-  // 2. High-Fidelity Speech Mouth Cadence driven by Audio Analyser or Procedural Syllables
+  // 2. Realistic Speech Mouth Cadence (Smooth oscillation at human syllable speed)
   if (isSpeaking || isAudioPlaying) {
     speechElapsed += delta;
-    let mouthOpening = 0;
-
-    if (wsAudioAnalyser && wsAudioDataArray && isAudioPlaying) {
-      wsAudioAnalyser.getByteFrequencyData(wsAudioDataArray);
-      let sum = 0;
-      const maxBin = Math.min(64, wsAudioDataArray.length);
-      for (let i = 4; i < maxBin; i++) {
-        sum += wsAudioDataArray[i];
-      }
-      const avg = sum / (maxBin - 4);
-      if (avg > 12) {
-        mouthOpening = Math.min(0.55, (avg / 100.0) * 0.55);
-      } else {
-        // Procedural syllable cadence fallback during quieter syllables
-        const syllableFreq = 3.6;
-        const phase = (speechElapsed * syllableFreq * Math.PI * 2) % (Math.PI * 2);
-        let wave = Math.sin(phase);
-        mouthOpening = wave > 0 ? Math.pow(wave, 1.35) * 0.32 : 0;
-      }
+    
+    // Human speech frequency (~3.6 syllables/sec)
+    const syllableFreq = 3.6;
+    const phase = (speechElapsed * syllableFreq * Math.PI * 2) % (Math.PI * 2);
+    
+    // Asymmetric natural articulation curve
+    let wave = Math.sin(phase);
+    if (wave > 0) {
+      wave = Math.pow(wave, 1.35); // smooth crisp opening
     } else {
-      // Procedural syllable cadence for Web Speech API
-      const syllableFreq = 3.6;
-      const phase = (speechElapsed * syllableFreq * Math.PI * 2) % (Math.PI * 2);
-      let wave = Math.sin(phase);
-      mouthOpening = wave > 0 ? Math.pow(wave, 1.35) * 0.42 : 0;
+      wave = 0; // mouth closes completely between syllables!
     }
 
-    targetJawOpen = mouthOpening;
-    targetVisemeAA = mouthOpening * 0.70;
-    targetVisemeO = mouthOpening * 0.35;
-    targetSmile = 0.18;
+    // Occasional brief pauses between words
+    const pausePhase = Math.sin(speechElapsed * 1.6);
+    const pauseDamping = pausePhase < -0.88 ? 0.05 : 1.0;
+
+    // Jaw amplitude: carefully calibrated to 0.28 - 0.38 (never gaping wide!)
+    const jawAmp = (0.28 + 0.08 * Math.sin(speechElapsed * 4.5)) * pauseDamping;
+
+    const vowelMod = Math.sin(speechElapsed * 2.4);
+
+    targetJawOpen = wave * jawAmp;
+    targetVisemeAA = wave * 0.22 * Math.max(0, vowelMod);
+    targetVisemeO = wave * 0.14 * Math.max(0, -vowelMod);
+    targetSmile = 0.16; // warm approachable expression while speaking
   } else {
+    // When not speaking, mouth immediately and smoothly glides to 0 (closed)
     targetJawOpen = 0;
     targetVisemeAA = 0;
     targetVisemeO = 0;
-    targetSmile = 0.08;
+    targetSmile = 0.06; // relaxed pleasant resting expression
   }
 
-  // Smooth 60FPS dampening / interpolation
-  const lerpSpeed = (isSpeaking || isAudioPlaying) ? 18.0 : 12.0;
+  // Butter-smooth 60FPS dampening / interpolation (never jerks or stays frozen)
+  const lerpSpeed = (isSpeaking || isAudioPlaying) ? 16.0 : 12.0;
   const t = Math.min(1.0, delta * lerpSpeed);
   
   currentJawOpen = THREE.MathUtils.lerp(currentJawOpen, targetJawOpen, t);
@@ -943,9 +966,9 @@ function updateFacialExpressions(delta) {
   currentVisemeO = THREE.MathUtils.lerp(currentVisemeO, targetVisemeO, t);
   currentSmile = THREE.MathUtils.lerp(currentSmile, targetSmile, t);
 
-  // Apply to all facial meshes synchronously
+  // Apply to all facial meshes synchronously (Head_Mesh, Teeth_Mesh, Tongue_Mesh)
   setMorphInfluence('jawOpen', currentJawOpen);
-  setMorphInfluence('mouthOpen', currentJawOpen * 0.85);
+  setMorphInfluence('mouthOpen', currentJawOpen * 0.7);
   setMorphInfluence('viseme_aa', currentVisemeAA);
   setMorphInfluence('viseme_O', currentVisemeO);
   setMorphInfluence('mouthSmile', currentSmile);
@@ -1058,7 +1081,22 @@ if (btnCameraBody) btnCameraBody.addEventListener('click', setCameraPortrait);
 
 if (btnWave) {
   btnWave.addEventListener('click', () => {
+    if (animations.waving) crossFadeToAction(animations.waving, 0.25);
     handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!");
+  });
+}
+
+if (btnGestureExplain) {
+  btnGestureExplain.addEventListener('click', () => {
+    if (animations.talking_explain) crossFadeToAction(animations.talking_explain, 0.25);
+    handleUserPrompt("Can you explain how affective computing, bio-sensing, and 3D avatars work at HTI Lab?");
+  });
+}
+
+if (btnGestureWelcome) {
+  btnGestureWelcome.addEventListener('click', () => {
+    if (animations.talking_welcome) crossFadeToAction(animations.talking_welcome, 0.25);
+    handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!");
   });
 }
 
