@@ -931,7 +931,7 @@ async def get_status():
 
 @app.post("/api/toggle-active")
 async def toggle_active_api(request: Request):
-    global is_veda_active
+    global is_veda_active, active_session, group_visit_state
     try:
         body = await request.json()
         target = body.get("active")
@@ -941,16 +941,26 @@ async def toggle_active_api(request: Request):
             is_veda_active = bool(target)
     except Exception:
         is_veda_active = not is_veda_active
-    if not is_veda_active:
-        close_camera()
+
     print(f"[API] Veda active state toggled to: {is_veda_active}")
-    await broadcast_json({"event": "veda_status", "data": {"active": is_veda_active}})
+    await broadcast_event("veda_status", {"active": is_veda_active})
+
+    if is_veda_active:
+        if active_session is None and not is_processing:
+            print("[API] Starting Veda group visit session and greeting pipeline...")
+            asyncio.create_task(start_group_session_async([], 0))
+    else:
+        close_camera()
+        active_session = None
+        group_visit_state = "idle"
+        voice_service.is_speaking = False
+
     return JSONResponse({"status": "success", "active": is_veda_active})
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global is_veda_active
+    global is_veda_active, active_session, group_visit_state
     await websocket.accept()
     active_websockets.append(websocket)
     voice_service.has_active_web_audio = True
@@ -977,10 +987,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         is_veda_active = not is_veda_active
                     else:
                         is_veda_active = bool(req_active)
-                    if not is_veda_active:
-                        close_camera()
+
                     print(f"[WS] Veda active state toggled: {is_veda_active}")
-                    await broadcast_json({"event": "veda_status", "data": {"active": is_veda_active}})
+                    await broadcast_event("veda_status", {"active": is_veda_active})
+
+                    if is_veda_active:
+                        if active_session is None and not is_processing:
+                            print("[WS] Starting Veda group visit session and greeting pipeline...")
+                            asyncio.create_task(start_group_session_async([], 0))
+                    else:
+                        close_camera()
+                        active_session = None
+                        group_visit_state = "idle"
+                        voice_service.is_speaking = False
                 elif event_type in ("user_text", "user_message"):
                     user_input = msg.get("text") or msg.get("data", {}).get("text")
                     if user_input and user_input.strip():
