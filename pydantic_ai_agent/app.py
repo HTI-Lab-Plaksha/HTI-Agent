@@ -706,15 +706,35 @@ def stt_loop():
 latest_jpeg_frame: Optional[bytes] = None
 frame_lock: threading.Lock = threading.Lock()
 
+
+def open_camera():
+    global camera
+    if camera is None or not camera.isOpened():
+        try:
+            camera = cv2.VideoCapture(config.camera_index)
+            print(f"[CAMERA] Hardware webcam opened on index {config.camera_index}")
+        except Exception as e:
+            print(f"[CAMERA] Open error: {e}")
+            camera = None
+
+
+def close_camera():
+    global camera, latest_jpeg_frame
+    if camera is not None:
+        try:
+            camera.release()
+            print("[CAMERA] Hardware webcam released and turned OFF.")
+        except Exception as e:
+            print(f"[CAMERA] Release error: {e}")
+        camera = None
+    with frame_lock:
+        latest_jpeg_frame = None
+
+
 # ================= Face Recognition Thread =================
 def camera_loop():
-    """Continuously capture frames and recognize groups/faces against known_faces.pkl."""
+    """Continuously capture frames and recognize groups/faces only when active."""
     global camera, consecutive_detections, latest_jpeg_frame, is_veda_active
-    try:
-        camera = cv2.VideoCapture(config.camera_index)
-    except Exception as e:
-        print(f"[CAMERA] Init error: {e}")
-        return
 
     frame_count = 0
     group_window_start: Optional[float] = None
@@ -724,9 +744,19 @@ def camera_loop():
 
     while True:
         try:
-            if camera is None or not camera.isOpened():
+            # If camera is disabled in config or Veda is paused, ensure camera is released
+            if not config.enable_camera or not is_veda_active:
+                if camera is not None:
+                    close_camera()
                 time.sleep(0.5)
                 continue
+
+            # Open hardware camera on demand only when Veda is explicitly started
+            if camera is None or not camera.isOpened():
+                open_camera()
+                if camera is None or not camera.isOpened():
+                    time.sleep(1.0)
+                    continue
 
             ret, frame = camera.read()
             if not ret or frame is None:
@@ -812,9 +842,14 @@ async def startup_event():
     load_data()
 
     # Launch camera & STT threads
-    threading.Thread(target=camera_loop, daemon=True).start()
+    if config.enable_camera:
+        threading.Thread(target=camera_loop, daemon=True).start()
+        print("[CAMERA] Camera monitoring thread started (enable_camera=True).")
+    else:
+        print("[CAMERA] Camera is DISABLED. Hardware webcam will NOT be opened.")
+
     threading.Thread(target=stt_loop, daemon=True).start()
-    print("[OK] Pydantic AI Server started. Camera and STT threads running.")
+    print("[OK] Pydantic AI Server started. STT thread running.")
 
 
 @app.get("/")
@@ -906,6 +941,8 @@ async def toggle_active_api(request: Request):
             is_veda_active = bool(target)
     except Exception:
         is_veda_active = not is_veda_active
+    if not is_veda_active:
+        close_camera()
     print(f"[API] Veda active state toggled to: {is_veda_active}")
     await broadcast_json({"event": "veda_status", "data": {"active": is_veda_active}})
     return JSONResponse({"status": "success", "active": is_veda_active})
@@ -940,6 +977,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         is_veda_active = not is_veda_active
                     else:
                         is_veda_active = bool(req_active)
+                    if not is_veda_active:
+                        close_camera()
                     print(f"[WS] Veda active state toggled: {is_veda_active}")
                     await broadcast_json({"event": "veda_status", "data": {"active": is_veda_active}})
                 elif event_type in ("user_text", "user_message"):

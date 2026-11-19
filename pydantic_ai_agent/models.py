@@ -1,6 +1,7 @@
 """
 Pydantic data models and schemas for HTI Lab Agent (Veda).
 """
+import os
 from typing import Optional, List, Dict, Any, Callable, Union
 from pydantic import BaseModel, Field
 
@@ -83,6 +84,7 @@ class AppConfig(BaseModel):
     consecutive_frames: int = 2
     process_nth_frame: int = 2
     camera_index: int = 0
+    enable_camera: bool = os.getenv("ENABLE_CAMERA", "0").lower() in ("1", "true", "yes")
     
     stt_model: str = "whisper-large-v3"
     llm_model: str = "openai/gpt-oss-20b"
