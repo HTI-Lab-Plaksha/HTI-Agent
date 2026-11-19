@@ -75,6 +75,7 @@ let wsAudioCtx = null;
 let wsAudioAnalyser = null;
 let wsAudioDataArray = null;
 let activeAudioSource = null;
+let activeAudioElement = null;
 let audioQueue = [];
 let isAudioPlaying = false;
 let lastAppendedMessage = { text: '', time: 0 };
@@ -205,6 +206,12 @@ async function initEngine() {
     connectAgentWebSocket();
 
     window.addEventListener('resize', onWindowResize);
+    window.addEventListener('click', () => {
+      initAudioContext();
+      if (wsAudioCtx && wsAudioCtx.state === 'suspended') {
+        wsAudioCtx.resume();
+      }
+    });
 
   } catch (error) {
     console.error("Engine initialization error:", error);
@@ -646,22 +653,20 @@ function handleAgentEvent(msg) {
 }
 
 async function handleSpeakAudio(payload) {
+  if (!payload || !payload.audio_base64) return;
   initAudioContext();
-  if (!wsAudioCtx) return;
 
-  const audioData = base64ToArrayBuffer(payload.audio_base64);
-  try {
-    const audioBuffer = await wsAudioCtx.decodeAudioData(audioData.slice(0));
-    audioQueue.push({
-      buffer: audioBuffer,
-      text: payload.text,
-      duration: payload.duration
-    });
-    if (!isAudioPlaying) {
-      playNextAudioInQueue();
-    }
-  } catch (err) {
-    console.warn("[WebAudio] Failed to decode MP3 chunk:", err);
+  const b64 = payload.audio_base64.trim();
+  const dataUrl = `data:audio/mp3;base64,${b64}`;
+
+  audioQueue.push({
+    dataUrl: dataUrl,
+    text: payload.text,
+    duration: payload.duration || 3.0
+  });
+
+  if (!isAudioPlaying) {
+    playNextAudioInQueue();
   }
 }
 
@@ -675,7 +680,7 @@ function playNextAudioInQueue() {
       statusIndicator.classList.add('online');
     }
     agentStatus.textContent = "Agent Ready • Listening";
-    if (animations.idle && currentAction !== animations.namaste) {
+    if (animations.idle && currentAction !== animations.idle) {
       crossFadeToAction(animations.idle, 0.6);
     }
     return;
@@ -686,11 +691,6 @@ function playNextAudioInQueue() {
   speechElapsed = 0;
 
   const item = audioQueue.shift();
-  const source = wsAudioCtx.createBufferSource();
-  source.buffer = item.buffer;
-  source.connect(wsAudioAnalyser);
-  wsAudioAnalyser.connect(wsAudioCtx.destination);
-  activeAudioSource = source;
 
   const statusIndicator = document.querySelector('.status-indicator');
   if (statusIndicator) {
@@ -705,12 +705,47 @@ function playNextAudioInQueue() {
     targetSmile = 0.32;
   }
 
-  source.onended = () => {
-    activeAudioSource = null;
+  if (activeAudioElement) {
+    try { activeAudioElement.pause(); } catch (e) {}
+    activeAudioElement = null;
+  }
+
+  const audio = new Audio(item.dataUrl);
+  activeAudioElement = audio;
+
+  if (wsAudioCtx) {
+    try {
+      if (wsAudioCtx.state === 'suspended') {
+        wsAudioCtx.resume();
+      }
+      if (wsAudioAnalyser) {
+        const source = wsAudioCtx.createMediaElementSource(audio);
+        source.connect(wsAudioAnalyser);
+        wsAudioAnalyser.connect(wsAudioCtx.destination);
+      }
+    } catch (e) {
+      // Audio element plays directly through default audio destination
+    }
+  }
+
+  audio.onended = () => {
+    activeAudioElement = null;
     playNextAudioInQueue();
   };
 
-  source.start(0);
+  audio.onerror = (err) => {
+    console.warn("[WebAudio] Native playback error:", err);
+    activeAudioElement = null;
+    playNextAudioInQueue();
+  };
+
+  audio.play().catch((err) => {
+    console.warn("[WebAudio] Autoplay blocked, unlocking on gesture:", err);
+    setTimeout(() => {
+      activeAudioElement = null;
+      playNextAudioInQueue();
+    }, (item.duration || 3.0) * 1000);
+  });
 }
 
 // User Prompt Handler (routes to Pydantic AI agent or local TTS fallback)
