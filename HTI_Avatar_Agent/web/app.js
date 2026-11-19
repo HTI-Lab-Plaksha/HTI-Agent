@@ -12,9 +12,6 @@ const chatForm = document.getElementById('chatForm');
 const userPromptInput = document.getElementById('userPromptInput');
 const btnCameraHead = document.getElementById('btnCameraHead');
 const btnCameraBody = document.getElementById('btnCameraBody');
-const btnWave = document.getElementById('btnWave');
-const btnGestureExplain = document.getElementById('btnGestureExplain');
-const btnGestureWelcome = document.getElementById('btnGestureWelcome');
 const btnStudioTrigger = document.getElementById('btnStudioTrigger');
 const btnOpenStudio = document.getElementById('btnOpenStudio');
 const studioModal = document.getElementById('studioModal');
@@ -39,21 +36,95 @@ const animations = {
 let currentAction = null;
 let facialMeshes = [];
 
-// Speech & Natural Mouth Cadence State
+// Real-Time FFT Lip-Sync State (ported from static/app.js MouthAnalyzer)
 let isSpeaking = false;
 let speechElapsed = 0;
 let currentUtterance = null;
 let gestureSwitchInterval = null;
 
-// Target and Current Morph Weights for Smooth 60FPS Lerping
-let targetJawOpen = 0;
-let targetVisemeAA = 0;
-let targetVisemeO = 0;
-let targetSmile = 0.08;
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
-let currentJawOpen = 0;
-let currentVisemeAA = 0;
-let currentVisemeO = 0;
+/** Spectrum (dB per FFT bin) -> mouth shapes [jaw, wide, round, up]. */
+class MouthAnalyzer {
+  constructor() {
+    this.peak = -40;          // running loudest level (dB); floor of -40 keeps hiss/noise silent
+    this.hist = [];           // recent frame levels for syllable contrast
+    this.cenMed = 1300;       // adaptive brightness centre (Hz)
+    this.cenSpread = 350;
+    this.vals = [0, 0, 0, 0];
+  }
+
+  process(db, binHz, dt) {
+    const n = db.length;
+    const bin = (hz) => Math.max(1, Math.round(hz / binHz));
+    const band = (a, b) => {
+      let s = 0;
+      const i1 = Math.min(n, bin(b));
+      for (let i = bin(a); i < i1; i++) s += Math.pow(10, db[i] / 10);
+      return s;
+    };
+    const eLo = band(120, 900), eMid = band(900, 2300), eHi = band(2300, 4200), eFr = band(4200, 8000);
+    const tot = eLo + eMid + eHi + eFr + 1e-20;
+    const lev = 10 * Math.log10(tot);
+
+    this.peak = Math.max(lev, this.peak - 4 * dt, -40);
+    const gate = this.peak - 24;
+    const level = clamp01((lev - gate) / (this.peak - gate + 1e-6));
+
+    const voiced = eLo / tot;
+    const fric = (eFr + 0.5 * eHi) / tot;
+
+    // brightness (spectral centroid): bright = "ee", dark = "oo"; F1 region = how open the vowel is
+    let cs = 0, cw = 0, fs = 0, fw = 0;
+    const c1 = Math.min(n, bin(3600));
+    for (let i = bin(200); i < c1; i++) { const p = Math.pow(10, db[i] / 10); cs += p * i * binHz; cw += p; }
+    const m1 = Math.min(n, bin(1100));
+    for (let i = bin(250); i < m1; i++) { const p = Math.pow(10, db[i] / 10); fs += p * i * binHz; fw += p; }
+    const cen = cs / (cw + 1e-20), f1 = fs / (fw + 1e-20);
+    if (level > 0.3) {
+      const a = Math.min(1, dt / 1.5);
+      this.cenMed += (cen - this.cenMed) * a;
+      this.cenSpread += (Math.max(150, Math.abs(cen - this.cenMed) * 1.6) - this.cenSpread) * a;
+    }
+    const z = (cen - this.cenMed) / this.cenSpread;
+    const f1n = clamp01((f1 - 380) / 320);
+
+    // syllable contrast: between the recent valley (consonant) and peak (vowel)
+    this.hist.push(lev);
+    if (this.hist.length > 14) this.hist.shift();
+    let mn = 1e9, mx = -1e9;
+    for (const v of this.hist) { if (v < mn) mn = v; if (v > mx) mx = v; }
+    const rel = clamp01((lev - mn) / (mx - mn + 4));
+
+    const vo = clamp01(voiced * 1.5);
+    const jaw = level * (0.22 + 0.48 * rel + 0.30 * f1n) * (0.45 + 0.55 * vo);
+    const wide = clamp01(0.75 * z) * level * (0.4 + 0.6 * vo);
+    const rnd = clamp01(-0.85 * z) * level * clamp01(voiced * 1.4);
+    const up = clamp01(2.2 * fric - 0.15) * clamp01(level * 1.4);
+    const target = [0.95 * jaw, 0.55 * wide, 0.75 * rnd, 0.65 * up];
+
+    // light smoothing: fast attack, slightly slower release
+    const tau = [[0.012, 0.035], [0.03, 0.05], [0.03, 0.05], [0.02, 0.04]];
+    for (let k = 0; k < 4; k++) {
+      const t = target[k] > this.vals[k] ? tau[k][0] : tau[k][1];
+      this.vals[k] = clamp01(this.vals[k] + (target[k] - this.vals[k]) * (1 - Math.exp(-dt / t)));
+    }
+    return this.vals;
+  }
+}
+
+// Real-time mouth shape values driven by FFT MouthAnalyzer (from static/app.js physics)
+// Maps: jawOpen→jawOpen/mouthOpen, mouthWide→viseme_aa, mouthRound→viseme_O, upperLipUp→mouthSmile
+let mouthVals = [0, 0, 0, 0];
+let specData = null;
+let mouthAnalyzer = null;
+let delayNode = null;
+let wsGainNode = null;
+let proceduralJaw = null;
+const LIP_DELAY = 0.03;  // seconds: mouth leads speakers slightly for natural sync
+
+// Smile target (set on greetings)
+let targetSmile = 0.08;
 let currentSmile = 0.08;
 
 // Natural Eye Blink State
@@ -65,7 +136,6 @@ let blinkProgress = 0;
 let agentWs = null;
 let wsAudioCtx = null;
 let wsAudioAnalyser = null;
-let wsAudioDataArray = null;
 let activeAudioSource = null;
 let activeAudioElement = null;
 let audioQueue = [];
@@ -101,9 +171,21 @@ function initAudioContext() {
     if (AudioContextClass) {
       wsAudioCtx = new AudioContextClass();
       wsAudioAnalyser = wsAudioCtx.createAnalyser();
-      wsAudioAnalyser.fftSize = 256;
-      wsAudioAnalyser.smoothingTimeConstant = 0.45;
-      wsAudioDataArray = new Uint8Array(wsAudioAnalyser.frequencyBinCount);
+      wsAudioAnalyser.fftSize = 1024;
+      wsAudioAnalyser.smoothingTimeConstant = 0;
+      wsAudioAnalyser.minDecibels = -120;
+      specData = new Float32Array(wsAudioAnalyser.frequencyBinCount);
+      mouthAnalyzer = new MouthAnalyzer();
+
+      delayNode = wsAudioCtx.createDelay(0.5);
+      delayNode.delayTime.value = LIP_DELAY;
+
+      wsGainNode = wsAudioCtx.createGain();
+      wsGainNode.gain.value = 1.0;
+
+      // Source -> Analyser (early) AND Source -> Delay -> Gain -> Speakers
+      delayNode.connect(wsGainNode);
+      wsGainNode.connect(wsAudioCtx.destination);
     }
   }
   if (wsAudioCtx && wsAudioCtx.state === 'suspended') {
@@ -646,10 +728,9 @@ async function handleSpeakAudio(payload) {
   initAudioContext();
 
   const b64 = payload.audio_base64.trim();
-  const dataUrl = `data:audio/mp3;base64,${b64}`;
 
   audioQueue.push({
-    dataUrl: dataUrl,
+    base64: b64,
     text: payload.text,
     duration: payload.duration || 3.0
   });
@@ -659,10 +740,11 @@ async function handleSpeakAudio(payload) {
   }
 }
 
-function playNextAudioInQueue() {
+async function playNextAudioInQueue() {
   if (audioQueue.length === 0) {
     isAudioPlaying = false;
     isSpeaking = false;
+    proceduralJaw = null;
     const statusIndicator = document.querySelector('.status-indicator');
     if (statusIndicator) {
       statusIndicator.classList.remove('speaking');
@@ -678,6 +760,7 @@ function playNextAudioInQueue() {
   isAudioPlaying = true;
   isSpeaking = true;
   speechElapsed = 0;
+  proceduralJaw = null;
 
   const item = audioQueue.shift();
 
@@ -699,32 +782,48 @@ function playNextAudioInQueue() {
     playAction(animations.idle);
   }
 
-  if (activeAudioElement) {
-    try { activeAudioElement.pause(); } catch (e) {}
-    activeAudioElement = null;
+  // Stop any active buffer source
+  if (activeAudioSource) {
+    try { activeAudioSource.stop(); } catch (e) {}
+    activeAudioSource = null;
   }
 
-  const audio = new Audio(item.dataUrl);
-  activeAudioElement = audio;
+  if (!wsAudioCtx) initAudioContext();
+  if (wsAudioCtx && wsAudioCtx.state === 'suspended') {
+    await wsAudioCtx.resume();
+  }
 
-  audio.onended = () => {
-    activeAudioElement = null;
-    playNextAudioInQueue();
-  };
+  try {
+    const arrayBuffer = base64ToArrayBuffer(item.base64);
+    const audioBuffer = await wsAudioCtx.decodeAudioData(arrayBuffer);
+    const source = wsAudioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(wsAudioAnalyser);
+    source.connect(delayNode);
+    activeAudioSource = source;
 
-  audio.onerror = (err) => {
-    console.warn("[WebAudio] Native playback error:", err);
-    activeAudioElement = null;
-    playNextAudioInQueue();
-  };
-
-  audio.play().catch((err) => {
-    console.warn("[WebAudio] Autoplay blocked, unlocking on click:", err);
-    setTimeout(() => {
-      activeAudioElement = null;
+    source.onended = () => {
+      activeAudioSource = null;
       playNextAudioInQueue();
-    }, (item.duration || 3.0) * 1000);
-  });
+    };
+
+    source.start(0);
+  } catch (err) {
+    console.warn("[WebAudio] decodeAudioData failed, running procedural cadence fallback:", err);
+    const fallbackMs = (item.duration || 3.0) * 1000;
+    const start = performance.now();
+    const interval = setInterval(() => {
+      const elapsed = performance.now() - start;
+      if (elapsed >= fallbackMs) {
+        clearInterval(interval);
+        proceduralJaw = null;
+        playNextAudioInQueue();
+      } else {
+        const cycle = (elapsed / 1000) * 5.5;
+        proceduralJaw = Math.max(0, Math.sin(cycle * Math.PI)) * 0.6;
+      }
+    }, 16);
+  }
 }
 
 // User Prompt Handler (routes to Pydantic AI agent or local TTS fallback)
@@ -872,57 +971,28 @@ function updateFacialExpressions(delta) {
     }
   }
 
-  // 2. Realistic Speech Mouth Cadence (Smooth oscillation at human syllable speed)
-  if (isSpeaking || isAudioPlaying) {
-    speechElapsed += delta;
-    
-    // Human speech frequency (~3.6 syllables/sec)
-    const syllableFreq = 3.6;
-    const phase = (speechElapsed * syllableFreq * Math.PI * 2) % (Math.PI * 2);
-    
-    // Asymmetric natural articulation curve
-    let wave = Math.sin(phase);
-    if (wave > 0) {
-      wave = Math.pow(wave, 1.35); // smooth crisp opening
-    } else {
-      wave = 0; // mouth closes completely between syllables!
-    }
-
-    // Occasional brief pauses between words
-    const pausePhase = Math.sin(speechElapsed * 1.6);
-    const pauseDamping = pausePhase < -0.88 ? 0.05 : 1.0;
-
-    // Jaw amplitude: carefully calibrated to 0.28 - 0.38 (never gaping wide!)
-    const jawAmp = (0.28 + 0.08 * Math.sin(speechElapsed * 4.5)) * pauseDamping;
-
-    const vowelMod = Math.sin(speechElapsed * 2.4);
-
-    targetJawOpen = wave * jawAmp;
-    targetVisemeAA = wave * 0.22 * Math.max(0, vowelMod);
-    targetVisemeO = wave * 0.14 * Math.max(0, -vowelMod);
-    targetSmile = 0.16; // warm approachable expression while speaking
+  // 2. Real-Time FFT Lip-Sync (driven by static/app.js MouthAnalyzer physics)
+  const dt = Math.min(Math.max(delta, 0.001), 0.1);
+  if (proceduralJaw !== null) {
+    const j = proceduralJaw;
+    const t = [j, 0.2 * j, 0, 0];
+    for (let k = 0; k < 4; k++) mouthVals[k] += (t[k] - mouthVals[k]) * 0.35;
+  } else if (wsAudioAnalyser && mouthAnalyzer && (isSpeaking || isAudioPlaying)) {
+    wsAudioAnalyser.getFloatFrequencyData(specData);
+    mouthVals = mouthAnalyzer.process(specData, wsAudioCtx.sampleRate / wsAudioAnalyser.fftSize, dt);
   } else {
-    // When not speaking, mouth immediately and smoothly glides to 0 (closed)
-    targetJawOpen = 0;
-    targetVisemeAA = 0;
-    targetVisemeO = 0;
-    targetSmile = 0.06; // relaxed pleasant resting expression
+    for (let k = 0; k < 4; k++) mouthVals[k] *= 0.8;
   }
 
-  // Butter-smooth 60FPS dampening / interpolation (never jerks or stays frozen)
-  const lerpSpeed = (isSpeaking || isAudioPlaying) ? 16.0 : 12.0;
-  const t = Math.min(1.0, delta * lerpSpeed);
-  
-  currentJawOpen = THREE.MathUtils.lerp(currentJawOpen, targetJawOpen, t);
-  currentVisemeAA = THREE.MathUtils.lerp(currentVisemeAA, targetVisemeAA, t);
-  currentVisemeO = THREE.MathUtils.lerp(currentVisemeO, targetVisemeO, t);
-  currentSmile = THREE.MathUtils.lerp(currentSmile, targetSmile, t);
+  // Map FFT output to morph targets
+  setMorphInfluence('jawOpen', mouthVals[0] * 0.95);
+  setMorphInfluence('mouthOpen', mouthVals[0] * 0.65);
+  setMorphInfluence('viseme_aa', mouthVals[1] * 0.55);
+  setMorphInfluence('viseme_O', mouthVals[2] * 0.75);
 
-  // Apply to all facial meshes synchronously (Head_Mesh, Teeth_Mesh, Tongue_Mesh)
-  setMorphInfluence('jawOpen', currentJawOpen);
-  setMorphInfluence('mouthOpen', currentJawOpen * 0.7);
-  setMorphInfluence('viseme_aa', currentVisemeAA);
-  setMorphInfluence('viseme_O', currentVisemeO);
+  // Smile: blend between FFT upperLipUp and greeting smile
+  const smileTarget = Math.max(mouthVals[3] * 0.65, targetSmile);
+  currentSmile += (smileTarget - currentSmile) * Math.min(1.0, dt * 12.0);
   setMorphInfluence('mouthSmile', currentSmile);
   setMorphInfluence('mouthSmileLeft', currentSmile);
   setMorphInfluence('mouthSmileRight', currentSmile);
@@ -1030,26 +1100,6 @@ chatForm.addEventListener('submit', (e) => {
 
 if (btnCameraHead) btnCameraHead.addEventListener('click', setCameraPortrait);
 if (btnCameraBody) btnCameraBody.addEventListener('click', setCameraPortrait);
-
-if (btnWave) {
-  btnWave.addEventListener('click', () => {
-    targetSmile = 0.28;
-    handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!");
-  });
-}
-
-if (btnGestureExplain) {
-  btnGestureExplain.addEventListener('click', () => {
-    handleUserPrompt("Can you explain how affective computing, bio-sensing, and 3D avatars work at HTI Lab?");
-  });
-}
-
-if (btnGestureWelcome) {
-  btnGestureWelcome.addEventListener('click', () => {
-    targetSmile = 0.28;
-    handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!");
-  });
-}
 
 // Global user interaction unlock for browser audio
 function unlockAudioPlayback() {
