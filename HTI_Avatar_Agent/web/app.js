@@ -21,6 +21,7 @@ const studioModal = document.getElementById('studioModal');
 const btnCloseStudio = document.getElementById('btnCloseStudio');
 const modalDropZone = document.getElementById('modalDropZone');
 const glbFileInput = document.getElementById('glbFileInput');
+const btnToggleVeda = document.getElementById('btnToggleVeda');
 const quickChips = document.querySelectorAll('.chip-btn');
 
 let scene = null;
@@ -78,6 +79,27 @@ let audioQueue = [];
 let isAudioPlaying = false;
 let lastAppendedMessage = { text: '', time: 0 };
 let activeSpeechSessionId = 0;
+let isVedaActive = false;
+
+function updateVedaToggleButton(active) {
+  isVedaActive = Boolean(active);
+  if (!btnToggleVeda) return;
+  const iconSpan = btnToggleVeda.querySelector('.btn-toggle-icon');
+  const textSpan = btnToggleVeda.querySelector('.btn-toggle-text');
+  if (isVedaActive) {
+    btnToggleVeda.classList.remove('paused');
+    btnToggleVeda.classList.add('running');
+    if (iconSpan) iconSpan.textContent = '⏹';
+    if (textSpan) textSpan.textContent = 'Stop Veda';
+    btnToggleVeda.title = "Veda is Active (Watching Camera & Greeting Visitors). Click to Pause.";
+  } else {
+    btnToggleVeda.classList.remove('running');
+    btnToggleVeda.classList.add('paused');
+    if (iconSpan) iconSpan.textContent = '▶';
+    if (textSpan) textSpan.textContent = 'Start Veda';
+    btnToggleVeda.title = "Veda is Paused. Click to Start watching camera and interacting.";
+  }
+}
 
 // Initialize Web Audio Context for real-time MP3 decoding & lip-sync
 function initAudioContext() {
@@ -605,6 +627,34 @@ function handleAgentEvent(msg) {
         agentStatus.textContent = `${data.name} detected`;
       }
       break;
+
+    case "veda_status":
+      updateVedaToggleButton(Boolean(data.active));
+      if (!data.active) {
+        if (activeAudioSource) {
+          try { activeAudioSource.stop(); } catch(e) {}
+          activeAudioSource = null;
+        }
+        audioQueue = [];
+        isAudioPlaying = false;
+        isSpeaking = false;
+        const statusIndicator = document.querySelector('.status-indicator');
+        if (statusIndicator) {
+          statusIndicator.classList.remove('speaking');
+          statusIndicator.classList.remove('online');
+        }
+        agentStatus.textContent = "Agent Paused (Standby)";
+        if (animations.idle) {
+          crossFadeToAction(animations.idle, 0.4);
+        }
+      } else {
+        const statusIndicator = document.querySelector('.status-indicator');
+        if (statusIndicator) {
+          statusIndicator.classList.add('online');
+        }
+        agentStatus.textContent = "Agent Ready • Watching Camera";
+      }
+      break;
   }
 }
 
@@ -1009,6 +1059,26 @@ btnGestureWelcome.addEventListener('click', () => {
   if (animations.talking_welcome) crossFadeToAction(animations.talking_welcome, 0.25);
   handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!", 'talking_welcome');
 });
+
+if (btnToggleVeda) {
+  btnToggleVeda.addEventListener('click', () => {
+    initAudioContext();
+    const nextState = !isVedaActive;
+    updateVedaToggleButton(nextState);
+    if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+      agentWs.send(JSON.stringify({
+        event: "toggle_active",
+        data: { active: nextState }
+      }));
+    } else {
+      fetch('/api/toggle-active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: nextState })
+      }).catch(err => console.warn('[Toggle Veda API error]', err));
+    }
+  });
+}
 
 quickChips.forEach(chip => {
   chip.addEventListener('click', () => {

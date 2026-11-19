@@ -109,10 +109,19 @@ last_speech_time: float = time.time()
 is_processing: bool = False
 is_speaking_user: bool = False
 
-# Unknown visitor multi-step state machine:
-# None -> "awaiting_name" -> "awaiting_intro" -> "conversing"
-unknown_visitor_state: Optional[str] = None
+# Active control toggle (Start / Stop Veda)
+is_veda_active: bool = False
+
+# Group tour & visitor state machine:
+# None -> "awaiting_day_response" -> "awaiting_demo_or_chat_choice" -> "awaiting_individual_name" -> "awaiting_individual_intro" -> "individual_chat" / "completed_tour_handoff"
+group_visit_state: Optional[str] = None
+current_group_known: List[str] = []
+current_group_unknown_count: int = 0
 unknown_visitor_name: str = ""
+
+HTI_VISION_PARAGRAPH: str = (
+    "The HTI Lab pioneers the next frontier of Human-AI Interaction by seamlessly blending multimodal bio-sensing with affective computing to build systems that truly understand and dynamically respond to human emotions and behavior in real-time."
+)
 
 
 def extract_person_name(text: str) -> str:
@@ -231,14 +240,27 @@ async def broadcast_event(event: str, data: dict = None):
 async def handle_conversation_turn(user_text: str):
     """Execute a turn with Veda using Pydantic AI Agent.
     
-    Handles the multi-step unknown visitor pipeline:
-      Step 1 (awaiting_name): Extract name from user speech, greet them, ask for intro.
-      Step 2 (awaiting_intro): Capture intro, launch background search with name+intro,
-                                transition to normal conversation.
-      Normal: Run Pydantic AI agent turn with full context.
+    Supports:
+      Stage 1 (awaiting_day_response):
+        - Acknowledges how their day was in 1 warm sentence matching visitor language.
+        - Introduces handout & 6 lab demonstrations (Dhvani, PosePilot, ATLAS, VR, Robotic Arm).
+        - Asks: 'Would you like to continue chatting with me, or would you like to proceed for the live demonstrations?'
+        - Transitions to 'awaiting_demo_or_chat_choice'.
+      Stage 2 (awaiting_demo_or_chat_choice):
+        - If they choose live demos: Veda cheerfully hands off to team and returns to standby.
+        - If they choose to chat with Veda:
+          - If a known visitor: enters personalized 1-on-1 chat with RAG context.
+          - If unknown: asks for their name ('awaiting_individual_name').
+      Stage 3 (awaiting_individual_name):
+        - Extracts name -> checks local Plaksha dataset -> if match, personalizes + background Tavily search.
+        - If not in dataset -> asks for short intro ('awaiting_individual_intro').
+      Stage 4 (awaiting_individual_intro):
+        - Receives intro -> background Tavily search -> starts rich conversation.
+      Normal Conversation:
+        - Full Pydantic AI turn with conversation history, projects tool, Tavily search tool.
     """
     global chat_history, active_session, session_context, last_speech_time, is_processing
-    global unknown_visitor_state, unknown_visitor_name
+    global group_visit_state, current_group_known, current_group_unknown_count, unknown_visitor_name
 
     if not user_text.strip():
         return
@@ -250,32 +272,99 @@ async def handle_conversation_turn(user_text: str):
     await broadcast_event("state_change", {"state": "active", "text": "Thinking..."})
 
     try:
-        # ---- STEP 1: Unknown visitor just told us their name ----
-        if unknown_visitor_state == "awaiting_name":
+        # =========================================================================
+        # STAGE 1: Visitors replied to "How was your day so far?"
+        # =========================================================================
+        if group_visit_state == "awaiting_day_response":
+            print(f"[AI] Visitors answered 'how was your day': {user_text}")
+
+            ack_prompt = (
+                f"The visitors were just asked 'How was your day so far?' and their reply was: '{user_text}'. "
+                "Respond in 1 very short, warm, empathetic sentence (under 12 words) acknowledging their day. "
+                "CRITICAL: Match the visitor's language (English, Hindi, or Hinglish) using feminine grammar ('sun kar accha laga', 'glad to hear that')."
+            )
+            deps = AgentDeps(
+                visitor_name=active_session or "Visitors",
+                session_context="",
+                broadcast_callback=broadcast_event
+            )
+            result = await veda_agent.run(ack_prompt, deps=deps)
+            day_ack = result.output.strip()
+
+            demos_overview = (
+                "Our team has just handed you a quick overview of our lab tour. "
+                "We have some exciting live demonstrations set up for you today — including Dhvani for Hindi speech feedback, "
+                "PosePilot for real-time movement correction, ATLAS for assistive spatial navigation, "
+                "an immersive VR experience, and a robotic arm you can play Rock-Paper-Scissors with! "
+                "Would you like to continue chatting with me, or would you like to proceed for the live demonstrations?"
+            )
+
+            full_reply = f"{day_ack} {demos_overview}"
+            group_visit_state = "awaiting_demo_or_chat_choice"
+
+            await broadcast_event("ai_response", {"text": full_reply})
+            await voice_service.speak(full_reply, broadcast_event)
+            return
+
+        # =========================================================================
+        # STAGE 2: Visitors choice (Demos vs Chat with Veda)
+        # =========================================================================
+        if group_visit_state == "awaiting_demo_or_chat_choice":
+            text_lower = user_text.lower()
+            demo_keywords = ["demo", "demonstration", "tour", "robotic", "arm", "vr", "posepilot", "dhvani", "atlas", "proceed", "walk", "see", "dekhna", "aage", "chalo", "let's go"]
+            is_demo = any(w in text_lower for w in demo_keywords) and not any(w in text_lower for w in ["chat with you", "talk to you"])
+            
+            if is_demo:
+                tour_reply = (
+                    "Wonderful! Please enjoy the live demonstrations with our team. "
+                    "I will be right here whenever you would like to chat again!"
+                )
+                group_visit_state = "completed_tour_handoff"
+                active_session = None
+                await broadcast_event("ai_response", {"text": tour_reply})
+                await voice_service.speak(tour_reply, broadcast_event)
+                await broadcast_event("state_change", {"state": "idle", "text": "Tour in Progress • Veda Standby"})
+                return
+            else:
+                # User chose to chat with Veda!
+                if current_group_known:
+                    known_person = current_group_known[0]
+                    active_session = known_person
+                    group_visit_state = "individual_chat"
+                    chat_intro = f"I would love to chat! {known_person}, what would you or the group like to explore first?"
+                    await broadcast_event("ai_response", {"text": chat_intro})
+                    await voice_service.speak(chat_intro, broadcast_event)
+                    return
+                else:
+                    group_visit_state = "awaiting_individual_name"
+                    ask_name = "I would love to chat! May I know your name?"
+                    await broadcast_event("ai_response", {"text": ask_name})
+                    await voice_service.speak(ask_name, broadcast_event)
+                    return
+
+        # =========================================================================
+        # STAGE 3: Individual visitor tells us their name
+        # =========================================================================
+        if group_visit_state == "awaiting_individual_name":
             extracted_name = extract_person_name(user_text)
             print(f"[AI] Extracted visitor name: '{extracted_name}' (from '{user_text}').")
             unknown_visitor_name = extracted_name
             active_session = extracted_name
 
-            # Check if this person is actually in our local dataset
             person = find_plaksha_person(extracted_name)
             if person:
-                # They ARE in the dataset — treat as known from here on
                 local_summary = person.to_conversational_summary()
                 session_context = local_summary
                 print(f"[AI] Local dataset matched for '{extracted_name}': {local_summary[:80]}...")
-                unknown_visitor_state = None  # skip intro, treat as known
+                group_visit_state = "individual_chat"
 
-                # Launch background web enrichment
                 asyncio.create_task(background_enrichment(extracted_name, local_summary))
 
-                # Generate a personalized welcome using the greeting agent
                 greeting = await generate_greeting(extracted_name, local_summary)
                 await broadcast_event("ai_response", {"text": greeting})
                 await voice_service.speak(greeting, broadcast_event)
             else:
-                # Not in dataset — move to intro step
-                unknown_visitor_state = "awaiting_intro"
+                group_visit_state = "awaiting_individual_intro"
                 deps = AgentDeps(
                     visitor_name=extracted_name,
                     session_context="",
@@ -285,7 +374,7 @@ async def handle_conversation_turn(user_text: str):
                     f"The visitor just told you their name: '{extracted_name}'. Their input was: '{user_text}'. "
                     "1. Greet them warmly by name in 1 sentence. "
                     "2. Ask if they mind giving a short introduction about themselves. "
-                    "3. CRITICAL: You are female assistant Veda. Always use feminine Hindi grammar (e.g. 'samajh gayi', 'kar sakti hoon', 'mujhe pata hai'). Match the visitor's language! If they spoke in Hindi, ask in Hindi. If in English, ask in English. If in Hinglish, ask in Hinglish. "
+                    "3. CRITICAL: You are female assistant Veda. Always use feminine Hindi grammar ('samajh gayi', 'kar sakti hoon'). Match their language! "
                     "Keep under 18 words for speech."
                 )
                 result = await veda_agent.run(ask_prompt, deps=deps)
@@ -294,17 +383,16 @@ async def handle_conversation_turn(user_text: str):
                 await voice_service.speak(intro_ask, broadcast_event)
             return
 
-        # ---- STEP 2: Unknown visitor just gave their intro ----
-        if unknown_visitor_state == "awaiting_intro":
+        # =========================================================================
+        # STAGE 4: Individual visitor gives intro
+        # =========================================================================
+        if group_visit_state == "awaiting_individual_intro":
             visitor_intro = user_text.strip()
-            print(f"[AI] Received intro from '{unknown_visitor_name}': {visitor_intro[:100]}...")
             session_context = f"Visitor '{unknown_visitor_name}' introduced themselves as: {visitor_intro}"
-            unknown_visitor_state = None  # transition to normal conversation
+            group_visit_state = "individual_chat"
 
-            # Launch background web search with name + intro for enrichment
             asyncio.create_task(background_enrichment(unknown_visitor_name, session_context))
 
-            # Acknowledge the intro warmly and start conversing, strictly matching language
             deps = AgentDeps(
                 visitor_name=unknown_visitor_name,
                 session_context=session_context,
@@ -313,9 +401,8 @@ async def handle_conversation_turn(user_text: str):
             ack_prompt = (
                 f"The visitor just introduced themselves. Their name is {unknown_visitor_name} "
                 f"and here is their intro: {visitor_intro}. "
-                "Respond warmly as female assistant Veda (using feminine grammar e.g. 'samajh gayi', 'bata sakti hoon'), mention something from their intro naturally, and keep the conversation going. "
-                "CRITICAL: Match the visitor's language! If their intro was in English, reply in English. If in Hindi, reply in Hindi. If in Hinglish, reply in Hinglish. "
-                "Keep response very concise (1 to 2 short sentences, maximum 25 words)."
+                "Respond warmly as female assistant Veda, mention something from their intro naturally, and keep the conversation going. "
+                "Match their language! Keep under 25 words."
             )
             result = await veda_agent.run(ack_prompt, deps=deps, message_history=chat_history)
             chat_history = result.all_messages()
@@ -325,8 +412,9 @@ async def handle_conversation_turn(user_text: str):
             await voice_service.speak(ai_reply, broadcast_event)
             return
 
-        # ---- NORMAL CONVERSATION TURN ----
-        # Prepare injected dependencies for Pydantic AI Agent
+        # =========================================================================
+        # NORMAL 1-ON-1 / GROUP CHAT TURN
+        # =========================================================================
         deps = AgentDeps(
             visitor_name=active_session or "Friend",
             session_context=session_context,
@@ -334,7 +422,6 @@ async def handle_conversation_turn(user_text: str):
         )
 
         llm_start = time.time()
-        # Run turn with Pydantic AI, preserving message history and auto-calling search tools if needed
         result = await veda_agent.run(
             user_text,
             deps=deps,
@@ -342,12 +429,10 @@ async def handle_conversation_turn(user_text: str):
         )
         print(f"[TIMING] Pydantic AI turn: {int((time.time() - llm_start) * 1000)}ms")
 
-        # Update message history
         chat_history = result.all_messages()
         ai_reply = result.output
 
         await broadcast_event("ai_response", {"text": ai_reply})
-        # Speak response (blocks until audio finishes)
         await voice_service.speak(ai_reply, broadcast_event)
 
     except Exception as e:
@@ -360,112 +445,121 @@ async def handle_conversation_turn(user_text: str):
         is_processing = False
 
 
-async def start_session_async(name: str):
+async def start_group_session_async(known_names_detected: List[str], unknown_count: int):
     """
-    Initiate an active session when face is confirmed or wake word is heard.
-
-    Pipeline:
-    KNOWN VISITOR:
-      1. Greet them warmly, include a brief HTI Lab intro, welcome them.
-      2. Start interaction based on ground data (local dataset / CSV bio).
-      3. Launch background web search to enrich context for later turns.
-
-    UNKNOWN VISITOR:
-      1. Greet them warmly, include a brief HTI Lab intro, welcome them.
-      2. Ask their name.  (→ awaiting_name state)
-      3. On receiving name, ask for a short intro.  (→ awaiting_intro state)
-      4. On receiving intro, launch background web search with name+intro.
-      5. Start interaction based on their intro + web results.
+    Initiate group greeting session when 4-5 people walk into the HTI Lab room.
+    
+    Logic:
+    - If all people are known (1 or more known names, 0 unknown):
+      Personalized greeting naming each person!
+    - If mixed group (some known, some unknown):
+      Greets everyone, specifically welcoming the known person(s) warmly.
+    - If completely unknown or mostly unindexed:
+      Universal group greeting without assuming names.
+    
+    Then speaks the HTI Lab vision paragraph, asks 'How was your day so far?',
+    and transitions to group_visit_state = 'awaiting_day_response'.
     """
     global active_session, chat_history, session_context, last_speech_time, is_processing
-    global unknown_visitor_state, unknown_visitor_name
+    global group_visit_state, current_group_known, current_group_unknown_count, unknown_visitor_name
 
-    active_session = name
+    current_group_known = list(known_names_detected)
+    current_group_unknown_count = unknown_count
     chat_history = []
     session_context = ""
     last_speech_time = time.time()
     is_processing = True
-    unknown_visitor_state = None
     unknown_visitor_name = ""
 
-    is_known = (name != "Unknown Visitor")
-    await broadcast_event("face_detected", {"name": name, "known": is_known})
+    total_people = len(known_names_detected) + unknown_count
+    primary_name = known_names_detected[0] if known_names_detected else "Group Visit"
+    active_session = primary_name
+
+    await broadcast_event("face_detected", {
+        "names": known_names_detected,
+        "unknown_count": unknown_count,
+        "total_people": total_people,
+        "name": primary_name
+    })
 
     try:
-        if is_known:
-            # ---- KNOWN VISITOR PIPELINE ----
-            # PART 1: Instant local dataset lookup
-            person = find_plaksha_person(name)
-            if person:
-                local_summary = person.to_conversational_summary()
-                print(f"[AI] Local Plaksha dataset match for '{name}': {local_summary[:90]}...")
+        # 1. Determine Welcome line
+        if known_names_detected and unknown_count == 0:
+            if len(known_names_detected) == 1:
+                welcome_line = f"Namaste {known_names_detected[0]}! Welcome to the Human-Technology Interaction Lab at Plaksha University. I am Veda, your AI lab assistant."
             else:
-                local_summary = get_csv_context(name)
-
-            session_context = local_summary
-
-            # Generate greeting that includes HTI Lab intro + personalized welcome
-            llm_start = time.time()
-            greeting = await generate_greeting(name, local_summary)
-            print(f"[TIMING] Instant Pydantic AI greeting: {int((time.time() - llm_start) * 1000)}ms")
-
-            # PART 2: Launch background Tavily web search (non-blocking)
-            asyncio.create_task(background_enrichment(name, local_summary))
-
-            # Speak greeting immediately without waiting for Tavily
-            await broadcast_event("ai_response", {"text": greeting})
-            await voice_service.speak(greeting, broadcast_event)
+                names_joined = " and ".join(known_names_detected) if len(known_names_detected) <= 2 else f"{', '.join(known_names_detected[:-1])}, and {known_names_detected[-1]}"
+                welcome_line = f"Namaste {names_joined}! Welcome to the Human-Technology Interaction Lab at Plaksha University. I am Veda, your AI lab assistant."
+        elif known_names_detected and unknown_count > 0:
+            names_joined = " and ".join(known_names_detected)
+            welcome_line = f"Hello everyone, and a warm Namaste to {names_joined}! Welcome to the Human-Technology Interaction Lab at Plaksha University. I am Veda, your AI lab assistant."
         else:
-            # ---- UNKNOWN VISITOR PIPELINE ----
-            # Set state machine to await their name next
-            unknown_visitor_state = "awaiting_name"
+            welcome_line = "Hello everyone! A very warm welcome to the Human-Technology Interaction Lab at Plaksha University. I am Veda, your AI lab assistant."
 
-            greeting = (
-                "Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University. "
-                "I'm Veda, your AI lab assistant. "
-                "The HTI Lab blends multimodal bio-sensing with affective computing to build AI that truly "
-                "understands and responds to human emotions and behaviour in real-time. "
-                "May I know your name?"
-            )
-            await broadcast_event("ai_response", {"text": greeting})
-            await voice_service.speak(greeting, broadcast_event)
+        # 2. Build full greeting speech
+        greeting_speech = (
+            f"{welcome_line} "
+            f"{HTI_VISION_PARAGRAPH} "
+            "How was your day so far?"
+        )
+
+        # Pre-load context if a known person is present
+        if known_names_detected:
+            person = find_plaksha_person(known_names_detected[0])
+            if person:
+                session_context = person.to_conversational_summary()
+                asyncio.create_task(background_enrichment(known_names_detected[0], session_context))
+            else:
+                session_context = get_csv_context(known_names_detected[0])
+
+        await broadcast_event("ai_response", {"text": greeting_speech})
+        await voice_service.speak(greeting_speech, broadcast_event)
+
+        group_visit_state = "awaiting_day_response"
+
     except Exception as e:
-        print(f"[AI] Session init error: {e}")
+        print(f"[AI] Group session init error: {e}")
+        group_visit_state = "awaiting_day_response"
     finally:
         last_speech_time = time.time()
         is_processing = False
+
+
+async def start_session_async(name: str):
+    """Compatibility wrapper for single face or wake-word triggers."""
+    if name != "Unknown Visitor":
+        await start_group_session_async([name], 0)
+    else:
+        await start_group_session_async([], 1)
 
 
 # ================= Watchdog Thread =================
 def inactivity_monitor():
     """Reset to idle after true silence. Never fires while someone is talking or recording audio."""
     global active_session, last_speech_time, is_processing, is_speaking_user
-    global unknown_visitor_state, unknown_visitor_name
+    global group_visit_state, unknown_visitor_name, is_veda_active
     while True:
         time.sleep(0.5)
-        # ONLY check inactivity if nobody is speaking, recording audio, or running an LLM turn
+        # ONLY check inactivity if Veda is ACTIVE and nobody is speaking, recording audio, or running an LLM turn
         if (
-            active_session is not None
+            is_veda_active
+            and active_session is not None
             and not voice_service.is_speaking
             and not is_processing
             and not is_speaking_user
         ):
+            # If in completed_tour_handoff state, don't interrupt live demos
+            if group_visit_state == "completed_tour_handoff":
+                continue
             if time.time() - last_speech_time > config.inactivity_timeout_seconds:
-                print(f"[AI] {config.inactivity_timeout_seconds}s of complete silence. Going to sleep.")
-                is_processing = True
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        voice_service.speak("Main yahaan hoon, jab zaroorat ho bula lena!", broadcast_event),
-                        main_loop
-                    )
-                finally:
-                    active_session = None
-                    unknown_visitor_state = None
-                    unknown_visitor_name = ""
-                    is_processing = False
-                    last_speech_time = time.time()
+                print(f"[AI] {config.inactivity_timeout_seconds}s of complete silence. Resetting session to ready.")
+                active_session = None
+                group_visit_state = None
+                unknown_visitor_name = ""
+                is_processing = False
+                last_speech_time = time.time()
                 asyncio.run_coroutine_threadsafe(
-                    broadcast_event("state_change", {"state": "idle", "text": "System Ready"}),
+                    broadcast_event("state_change", {"state": "idle", "text": "Veda Active • Watching Camera"}),
                     main_loop
                 )
 
@@ -496,7 +590,7 @@ def transcribe_audio(audio_bytes: bytes) -> str:
 
 def stt_loop():
     """Continuously monitor microphone, run energy VAD, and transcribe via Groq Whisper."""
-    global active_session, is_speaking_user, last_speech_time
+    global active_session, is_speaking_user, last_speech_time, is_veda_active
     import pyaudio
 
     # Launch watchdog thread
@@ -521,8 +615,8 @@ def stt_loop():
         try:
             data = stream.read(config.audio_chunk, exception_on_overflow=False)
 
-            # Skip listening while Veda is speaking or processing
-            if voice_service.is_speaking or is_processing:
+            # Skip listening if Veda is NOT active (Paused) or is speaking/processing
+            if not is_veda_active or voice_service.is_speaking or is_processing:
                 continue
 
             # Calculate RMS audio energy
@@ -599,8 +693,8 @@ frame_lock: threading.Lock = threading.Lock()
 
 # ================= Face Recognition Thread =================
 def camera_loop():
-    """Continuously capture frames and recognize faces against known_faces.pkl."""
-    global camera, consecutive_detections, latest_jpeg_frame
+    """Continuously capture frames and recognize groups/faces against known_faces.pkl."""
+    global camera, consecutive_detections, latest_jpeg_frame, is_veda_active
     try:
         camera = cv2.VideoCapture(config.camera_index)
     except Exception as e:
@@ -608,6 +702,10 @@ def camera_loop():
         return
 
     frame_count = 0
+    group_window_start: Optional[float] = None
+    group_known_seen: Set[str] = set()
+    group_max_unknown: int = 0
+    group_frame_hits: int = 0
 
     while True:
         try:
@@ -629,35 +727,61 @@ def camera_loop():
                     with frame_lock:
                         latest_jpeg_frame = buffer.tobytes()
 
-            # Only check faces if idle and not currently processing/speaking
-            if frame_count % config.process_nth_frame == 0 and active_session is None and not is_processing:
+            # ONLY check faces if Veda is ACTIVE and idle (not currently in a session or speaking)
+            if is_veda_active and frame_count % config.process_nth_frame == 0 and active_session is None and not is_processing:
                 small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
                 rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
                 locations = face_recognition.face_locations(rgb, model="hog")
-                encodings = face_recognition.face_encodings(rgb, locations)
+                if locations:
+                    encodings = face_recognition.face_encodings(rgb, locations)
 
-                detected_names: Set[str] = set()
-                for enc in encodings:
-                    distances = face_recognition.face_distance(known_encodings, enc)
-                    if len(distances) > 0 and distances.min() <= config.face_distance_threshold:
-                        idx = distances.argmin()
-                        name = known_names[idx]
+                    frame_known = set()
+                    frame_unknown_count = 0
+
+                    for enc in encodings:
+                        distances = face_recognition.face_distance(known_encodings, enc)
+                        if len(distances) > 0 and distances.min() <= config.face_distance_threshold:
+                            idx = distances.argmin()
+                            frame_known.add(known_names[idx])
+                        else:
+                            frame_unknown_count += 1
+
+                    # Group accumulation window across frames (captures all 4-5 people as they walk in)
+                    if group_window_start is None:
+                        group_window_start = time.time()
+                        group_known_seen = set(frame_known)
+                        group_max_unknown = frame_unknown_count
+                        group_frame_hits = 1
                     else:
-                        name = "Unknown Visitor"
-                    detected_names.add(name)
+                        group_known_seen.update(frame_known)
+                        group_max_unknown = max(group_max_unknown, frame_unknown_count)
+                        group_frame_hits += 1
 
-                for n in list(consecutive_detections.keys()):
-                    if n not in detected_names:
-                        consecutive_detections[n] = 0
+                    elapsed = time.time() - group_window_start
+                    # Once we have at least 3 hits across >= 1.0 second of stable presence
+                    if group_frame_hits >= 3 and elapsed >= 1.0:
+                        final_known = list(group_known_seen)
+                        final_unknown = group_max_unknown
+                        print(f"[GROUP CONFIRMED] Known: {final_known}, Unknown count: {final_unknown}")
 
-                for n in detected_names:
-                    consecutive_detections[n] = consecutive_detections.get(n, 0) + 1
-                    if consecutive_detections[n] >= config.consecutive_frames:
-                        print(f"[FACE] Confirmed: {n}")
-                        consecutive_detections = {}
-                        asyncio.run_coroutine_threadsafe(start_session_async(n), main_loop)
-                        break
+                        # Reset window
+                        group_window_start = None
+                        group_known_seen = set()
+                        group_max_unknown = 0
+                        group_frame_hits = 0
+
+                        asyncio.run_coroutine_threadsafe(
+                            start_group_session_async(final_known, final_unknown),
+                            main_loop
+                        )
+                else:
+                    # No faces in frame - reset window if > 1.2s of no faces
+                    if group_window_start and (time.time() - group_window_start > 1.2):
+                        group_window_start = None
+                        group_known_seen = set()
+                        group_max_unknown = 0
+                        group_frame_hits = 0
 
             time.sleep(0.01)
         except Exception as cam_err:
@@ -745,12 +869,47 @@ async def video_feed():
     return StreamingResponse(generate_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.get("/api/status")
+async def get_status():
+    return JSONResponse({
+        "status": "success",
+        "active": is_veda_active,
+        "group_visit_state": group_visit_state,
+        "current_person": current_person
+    })
+
+
+@app.post("/api/toggle-active")
+async def toggle_active_api(request: Request):
+    global is_veda_active
+    try:
+        body = await request.json()
+        target = body.get("active")
+        if target is None:
+            is_veda_active = not is_veda_active
+        else:
+            is_veda_active = bool(target)
+    except Exception:
+        is_veda_active = not is_veda_active
+    print(f"[API] Veda active state toggled to: {is_veda_active}")
+    await broadcast_json({"event": "veda_status", "data": {"active": is_veda_active}})
+    return JSONResponse({"status": "success", "active": is_veda_active})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global is_veda_active
     await websocket.accept()
     active_websockets.append(websocket)
     voice_service.has_active_web_audio = True
     print(f"[WS] Client connected ({len(active_websockets)} active). Web audio enabled for 3D avatar.")
+
+    # Immediately report current Veda state to newly connected client
+    try:
+        await websocket.send_text(json.dumps({"event": "veda_status", "data": {"active": is_veda_active}}))
+    except Exception as e:
+        print(f"[WS] Failed to send initial status: {e}")
+
     try:
         while True:
             text = await websocket.receive_text()
@@ -760,6 +919,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 if event_type == "audio_mode":
                     voice_service.has_active_web_audio = bool(msg.get("data", {}).get("web_audio", True))
                     print(f"[WS] Audio mode updated: web_audio={voice_service.has_active_web_audio}")
+                elif event_type == "toggle_active":
+                    req_active = msg.get("data", {}).get("active")
+                    if req_active is None:
+                        is_veda_active = not is_veda_active
+                    else:
+                        is_veda_active = bool(req_active)
+                    print(f"[WS] Veda active state toggled: {is_veda_active}")
+                    await broadcast_json({"event": "veda_status", "data": {"active": is_veda_active}})
                 elif event_type in ("user_text", "user_message"):
                     user_input = msg.get("text") or msg.get("data", {}).get("text")
                     if user_input and user_input.strip():
