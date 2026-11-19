@@ -34,3 +34,6 @@ recording.wav
 # IDE
 .vscode/
 .idea/
+
+# External cloned websites
+Website-copy/

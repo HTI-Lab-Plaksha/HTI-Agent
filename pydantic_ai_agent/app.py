@@ -30,6 +30,7 @@ import face_recognition
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -66,10 +67,20 @@ voice_service = VoiceService(voice=config.edge_tts_voice, rate=config.edge_tts_r
 # ================= FastAPI Application =================
 app = FastAPI(title="HTI Lab Veda Agent (Pydantic AI)")
 
+# Enable CORS for website embeds and GitHub Pages
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ================= Mount Interface Folders =================
 HTI_AVATAR_DIR = ROOT_DIR / "HTI_Avatar_Agent"
 HTI_WEB_DIR = HTI_AVATAR_DIR / "web"
 HTI_FINAL_DIR = HTI_AVATAR_DIR / "final"
+HTI_WEBSITE_DIR = ROOT_DIR / "Website-copy"
 
 if HTI_FINAL_DIR.exists():
     print(f"[AVATAR] Serving 3D avatar & animations from: {HTI_FINAL_DIR}")
@@ -78,6 +89,10 @@ if HTI_FINAL_DIR.exists():
 if HTI_WEB_DIR.exists():
     print(f"[FRONTEND] Serving HTI Avatar Agent UI from: {HTI_WEB_DIR}")
     app.mount("/web", StaticFiles(directory=str(HTI_WEB_DIR)), name="web")
+
+if HTI_WEBSITE_DIR.exists():
+    print(f"[WEBSITE] Serving HTI Lab Website from: {HTI_WEBSITE_DIR}")
+    app.mount("/site", StaticFiles(directory=str(HTI_WEBSITE_DIR), html=True), name="site")
 
 # Mount legacy static folder (prioritizing static1 if present)
 static_candidates = [
