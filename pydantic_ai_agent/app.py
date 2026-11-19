@@ -104,8 +104,17 @@ static_candidates = [
 static_path = next((p for p in static_candidates if p.exists()), BASE_DIR / "static1")
 
 if static_path.exists():
-    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-    app.mount("/static1", StaticFiles(directory=str(static_path)), name="static1")
+    print(f"[STATIC] Mounting static test interface from: {static_path}")
+    app.mount("/static", StaticFiles(directory=str(static_path), html=True), name="static")
+    app.mount("/static1", StaticFiles(directory=str(static_path), html=True), name="static1")
+
+@app.get("/test")
+def test_static():
+    index_file = static_path / "index.html"
+    if index_file.exists():
+        with open(index_file, "r") as f:
+            return HTMLResponse(f.read())
+    return HTMLResponse("<h1>Static test not found</h1>")
 
 active_websockets: List[WebSocket] = []
 main_loop: Optional[asyncio.AbstractEventLoop] = None

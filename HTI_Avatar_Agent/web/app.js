@@ -26,17 +26,36 @@ let camera = null;
 let renderer = null;
 let controls = null;
 let currentModel = null;
-let mixer = null;
 let clock = new THREE.Clock();
 
-const animations = {
-  idle: null
-};
+let avatarMesh = null;
+let morphMeshes = [];      // every mesh part that carries the mouth blendshapes (skin, lips, mouth interior)
+let bones = {};
+let initialBoneRotations = {};
 
-let currentAction = null;
-let facialMeshes = [];
+// Lip-sync values: [jawOpen, mouthWide, mouthRound, upperLipUp], each 0..1
+const MOUTH_SHAPES = ['jawOpen', 'mouthWide', 'mouthRound', 'upperLipUp'];
+const BLINK_SHAPE = 'eyeBlink';
+let blinkVal = 0;          // 0 = eyes open, 1 = closed
+let mouthVals = [0, 0, 0, 0];
+let specData = null;
+let delayNode = null;
+let wsGainNode = null;
+let mouthAnalyzer = null;
+let proceduralJaw = null;   // only used if the browser cannot decode the audio
+const LIP_DELAY = 0.03;
 
-// Real-Time FFT Lip-Sync State (ported from static/app.js MouthAnalyzer)
+// Natural Eye Blinking (exact static ease curve)
+let isBlinking = false;
+let blinkStartTime = 0;
+let nextBlinkTime = 2.5;
+
+// Interaction & Posture State
+let currentState = 'idle'; // 'idle', 'active' (thinking), 'listening', 'speaking'
+let mouseX = 0, mouseY = 0;
+let targetHeadRotY = 0, targetHeadRotX = 0;
+let isPortraitView = true;
+
 let isSpeaking = false;
 let speechElapsed = 0;
 let currentUtterance = null;
@@ -112,25 +131,6 @@ class MouthAnalyzer {
     return this.vals;
   }
 }
-
-// Real-time mouth shape values driven by FFT MouthAnalyzer (from static/app.js physics)
-// Maps: jawOpen→jawOpen/mouthOpen, mouthWide→viseme_aa, mouthRound→viseme_O, upperLipUp→mouthSmile
-let mouthVals = [0, 0, 0, 0];
-let specData = null;
-let mouthAnalyzer = null;
-let delayNode = null;
-let wsGainNode = null;
-let proceduralJaw = null;
-const LIP_DELAY = 0.03;  // seconds: mouth leads speakers slightly for natural sync
-
-// Smile target (set on greetings)
-let targetSmile = 0.08;
-let currentSmile = 0.08;
-
-// Natural Eye Blink State
-let blinkTimer = 2.5 + Math.random() * 2.5;
-let isBlinking = false;
-let blinkProgress = 0;
 
 // Agent WebSocket & Web Audio API State
 let agentWs = null;
@@ -213,14 +213,14 @@ async function initEngine() {
 
     scene = new THREE.Scene();
 
-    camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
-    setCameraPortrait();
+    camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 50);
+    camera.position.set(0, 1.50, 0.62);
 
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.35;
+    renderer.toneMappingExposure = 1.15;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.setClearColor(0x0a0a0a, 1);
@@ -229,10 +229,12 @@ async function initEngine() {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
-    controls.target.set(0, 1.48, 0);
-    controls.maxPolarAngle = Math.PI / 2 + 0.1;
-    controls.minDistance = 0.6;
-    controls.maxDistance = 1.35;
+    controls.minDistance = 0.40;
+    controls.maxDistance = 1.15;
+    controls.maxPolarAngle = Math.PI / 2;
+    controls.minPolarAngle = Math.PI / 3;
+    controls.target.set(0, 1.48, 0.05);
+    controls.update();
 
     // Black & White High-Contrast Studio Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 1.3);
@@ -280,6 +282,7 @@ async function initEngine() {
     connectAgentWebSocket();
 
     window.addEventListener('resize', onWindowResize);
+    window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('click', () => {
       initAudioContext();
       if (wsAudioCtx && wsAudioCtx.state === 'suspended') {
@@ -322,177 +325,51 @@ async function loadAvatarAndAnimations(customUrl = null) {
 async function applyLoadedGLTF(gltf) {
   if (currentModel) {
     scene.remove(currentModel);
-    if (mixer) mixer.stopAllAction();
   }
 
   currentModel = gltf.scene;
-  facialMeshes = [];
+  currentModel.position.set(0, 0, 0);
+  scene.add(currentModel);
 
-  // Normalize bone names for seamless Mixamo/ARKit track binding
+  morphMeshes = [];
+  bones = {};
+  initialBoneRotations = {};
+
+  // Traverse and locate mesh, morph targets, and bones (exact static/app.js rigging)
   currentModel.traverse((child) => {
-    if (child.name) {
-      child.name = child.name.replace(/:/g, '_');
-    }
     if (child.isMesh) {
+      avatarMesh = child;
+      child.frustumCulled = false;
       child.castShadow = true;
       child.receiveShadow = true;
+
       if (child.material) {
-        child.material.flatShading = false;
-        child.material.needsUpdate = true;
+        child.material.roughness = Math.max(0.35, child.material.roughness || 0.4);
+        child.material.envMapIntensity = 1.0;
       }
-      if (child.morphTargetDictionary && child.morphTargetInfluences) {
-        facialMeshes.push(child);
+
+      // Collect EVERY part that has mouth blendshapes (the model is split in 3 parts)
+      if (child.morphTargetDictionary && (MOUTH_SHAPES.some(n => n in child.morphTargetDictionary) || BLINK_SHAPE in child.morphTargetDictionary)) {
+        morphMeshes.push(child);
       }
+    }
+
+    if (child.isBone) {
+      const name = child.name;
+      bones[name] = child;
+      initialBoneRotations[name] = {
+        x: child.rotation.x,
+        y: child.rotation.y,
+        z: child.rotation.z
+      };
     }
   });
 
-  // Reset animations state
-  for (const k in animations) {
-    animations[k] = null;
-  }
-  currentAction = null;
-
-  scene.add(currentModel);
-  mixer = new THREE.AnimationMixer(currentModel);
-
-  // 1. Bind native embedded animations from meera.glb
-  if (gltf.animations && gltf.animations.length > 0) {
-    gltf.animations.forEach((clip) => {
-      clip.tracks.forEach(track => {
-        if (track.name.includes(':')) {
-          track.name = track.name.replace(/:/g, '_');
-        }
-      });
-      const baseName = clip.name.split('.')[0].toLowerCase();
-      if (animations.hasOwnProperty(baseName) && !animations[baseName]) {
-        console.log(`[Native Embedded Animation Bound]: ${clip.name} -> animations.${baseName}`);
-        const action = mixer.clipAction(clip);
-        if (baseName === 'idle' || baseName.startsWith('talking')) {
-          action.setLoop(THREE.LoopRepeat);
-        } else {
-          action.setLoop(THREE.LoopOnce);
-          action.clampWhenFinished = true;
-        }
-        animations[baseName] = action;
-      }
-    });
-  }
-
-  // 2. Load animation clips from anims folder
-  await loadAnimationClips();
-
-  // If idle animation was bound, play it immediately
-  if (!currentAction && animations.idle) {
-    playAction(animations.idle);
-  }
+  console.log('[AVATAR] Model rigged successfully. Bones count:', Object.keys(bones).length,
+              '| mouth-shape meshes:', morphMeshes.length);
 
   loadingOverlay.classList.add('hidden');
-  agentStatus.textContent = facialMeshes.length > 0 ? "HD Persona Active • Ready" : "Avatar Active • Gestures Ready";
-}
-
-// Helper to set morph target value synchronously across all facial meshes
-function setMorphInfluence(targetName, value) {
-  for (let i = 0; i < facialMeshes.length; i++) {
-    const mesh = facialMeshes[i];
-    if (!mesh.morphTargetDictionary || !mesh.morphTargetInfluences) continue;
-    let idx = mesh.morphTargetDictionary[targetName];
-    if (idx === undefined) {
-      const lower = targetName.toLowerCase();
-      for (const k in mesh.morphTargetDictionary) {
-        if (k.toLowerCase() === lower) {
-          idx = mesh.morphTargetDictionary[k];
-          break;
-        }
-      }
-    }
-    if (idx !== undefined) {
-      mesh.morphTargetInfluences[idx] = value;
-    }
-  }
-}
-
-async function loadAnimationClips() {
-  const loader = new GLTFLoader();
-  const cacheBust = Date.now();
-  const animNames = [
-    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` }
-  ];
-
-  for (const anim of animNames) {
-    if (animations[anim.key]) continue;
-    try {
-      const animGltf = await loadGLTF(loader, anim.file);
-      if (animGltf.animations && animGltf.animations.length > 0) {
-        let clip = animGltf.animations.find(a => a.name.toLowerCase().includes(anim.key.toLowerCase())) 
-                || animGltf.animations[0];
-                
-        clip = retargetClip(clip, currentModel);
-        const action = mixer.clipAction(clip);
-        action.setLoop(THREE.LoopRepeat);
-        animations[anim.key] = action;
-      }
-    } catch (err) {
-      console.warn(`Could not load animation ${anim.key}:`, err);
-    }
-  }
-
-  if (!currentAction && animations.idle) {
-    playAction(animations.idle);
-  }
-
-  window.animations = animations;
-  window.playAction = playAction;
-  window.crossFadeToAction = crossFadeToAction;
-}
-
-// Retarget animation tracks from Mixamo or custom clips to Meera's skeleton
-function retargetClip(clip, model) {
-  if (!clip || !clip.tracks || !model) return clip;
-  
-  const boneMap = new Map();
-  model.traverse((node) => {
-    if (node.name) {
-      const original = node.name;
-      boneMap.set(original.toLowerCase(), original);
-      const clean = original.replace(/^mixamorig\d*[:_]?/i, '').toLowerCase();
-      boneMap.set(clean, original);
-    }
-  });
-
-  const remappedTracks = [];
-  clip.tracks.forEach((track) => {
-    const dotIndex = track.name.lastIndexOf('.');
-    if (dotIndex === -1) return;
-    const targetNodeName = track.name.substring(0, dotIndex);
-    const propertyName = track.name.substring(dotIndex);
-
-    if (!propertyName.includes('quaternion')) return;
-
-    const simpleTarget = targetNodeName.split('/').pop().replace(/:/g, '_');
-    const cleanTarget = simpleTarget.replace(/^mixamorig\d*[:_]?/i, '').toLowerCase();
-
-    const excludedBones = [
-      'hips', 'armature', 'root', 
-      'leftupleg', 'rightupleg', 'leftleg', 'rightleg', 
-      'leftfoot', 'rightfoot', 'lefttoebase', 'righttoebase'
-    ];
-    if (excludedBones.includes(cleanTarget)) return;
-
-    const matchedBone = boneMap.get(cleanTarget) || 
-                         boneMap.get(simpleTarget.toLowerCase()) || 
-                         boneMap.get(targetNodeName.toLowerCase());
-
-    if (matchedBone) {
-      const clonedTrack = track.clone();
-      clonedTrack.name = matchedBone.replace(/:/g, '_') + propertyName;
-      remappedTracks.push(clonedTrack);
-    }
-  });
-
-  if (remappedTracks.length > 0) {
-    clip.tracks = remappedTracks;
-  }
-  return clip;
+  agentStatus.textContent = "Veda Ready";
 }
 
 function loadGLTF(loader, url) {
@@ -541,22 +418,21 @@ function crossFadeToAction(newAction, duration = 0.25) {
   }
 }
 
-// Camera Presets - Strictly Portrait Only
 function setCameraPortrait() {
   if (camera && controls) {
-    camera.position.set(0, 1.54, 1.02);
-    controls.target.set(0, 1.48, 0);
-    controls.minDistance = 0.6;
-    controls.maxDistance = 1.35;
+    camera.position.set(0, 1.50, 0.62);
+    controls.target.set(0, 1.48, 0.05);
     controls.update();
   }
-  if (btnCameraHead) btnCameraHead.classList.add('active');
-  if (btnCameraBody) btnCameraBody.classList.remove('active');
 }
 
 function setCameraFullBody() {
-  // Enforce portrait only as requested
   setCameraPortrait();
+}
+
+function onMouseMove(e) {
+  mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+  mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
 }
 
 // Append Chat Message
@@ -943,35 +819,16 @@ async function speakText(text, gestureKey = null) {
   }
 }
 
-// Facial Expressions, Blinking, and Lip-Sync Loop (Exact HTI_Avatar_Agent 2 Physics)
-function updateFacialExpressions(delta) {
-  if (facialMeshes.length === 0) return;
+// Render Loop (Exact static/app.js physics: FFT mouth, ease eye blinking, spine breathing & mouse gaze)
+function animate() {
+  requestAnimationFrame(animate);
 
-  // 1. Natural Organic Eye Blinking (Exact HTI_Avatar_Agent 2 Physics)
-  blinkTimer -= delta;
-  if (blinkTimer <= 0 && !isBlinking) {
-    isBlinking = true;
-    blinkProgress = 0;
-    blinkTimer = 3.2 + Math.random() * 2.8;
-  }
-  if (isBlinking) {
-    blinkProgress += delta / 0.16;
-    if (blinkProgress >= 1.0) {
-      isBlinking = false;
-      setMorphInfluence('eyeBlinkLeft', 0);
-      setMorphInfluence('eyeBlinkRight', 0);
-      setMorphInfluence('eyesClosed', 0);
-      setMorphInfluence('blink', 0);
-    } else {
-      const blinkWeight = Math.sin(blinkProgress * Math.PI);
-      setMorphInfluence('eyeBlinkLeft', blinkWeight);
-      setMorphInfluence('eyeBlinkRight', blinkWeight);
-      setMorphInfluence('eyesClosed', blinkWeight);
-      setMorphInfluence('blink', blinkWeight);
-    }
-  }
+  const delta = clock.getDelta();
+  const elapsedTime = clock.getElapsedTime();
 
-  // 2. Real-Time FFT Lip-Sync (driven by static/app.js MouthAnalyzer physics)
+  if (controls) controls.update();
+
+  // 1. Real-Time Lip Sync (analyses the audio BEFORE it reaches the speakers)
   const dt = Math.min(Math.max(delta, 0.001), 0.1);
   if (proceduralJaw !== null) {
     const j = proceduralJaw;
@@ -984,28 +841,73 @@ function updateFacialExpressions(delta) {
     for (let k = 0; k < 4; k++) mouthVals[k] *= 0.8;
   }
 
-  // Map FFT output to morph targets
-  setMorphInfluence('jawOpen', mouthVals[0] * 0.95);
-  setMorphInfluence('mouthOpen', mouthVals[0] * 0.65);
-  setMorphInfluence('viseme_aa', mouthVals[1] * 0.55);
-  setMorphInfluence('viseme_O', mouthVals[2] * 0.75);
+  // Apply the mouth shapes to every part of the model that has them
+  for (const m of morphMeshes) {
+    for (let k = 0; k < 4; k++) {
+      const idx = m.morphTargetDictionary[MOUTH_SHAPES[k]];
+      if (idx !== undefined) m.morphTargetInfluences[idx] = mouthVals[k];
+    }
+  }
 
-  // Smile: blend between FFT upperLipUp and greeting smile
-  const smileTarget = Math.max(mouthVals[3] * 0.65, targetSmile);
-  currentSmile += (smileTarget - currentSmile) * Math.min(1.0, dt * 12.0);
-  setMorphInfluence('mouthSmile', currentSmile);
-  setMorphInfluence('mouthSmileLeft', currentSmile);
-  setMorphInfluence('mouthSmileRight', currentSmile);
-}
+  // 2. Natural eye blinking (eyelids are part of avatar.glb, driven by the 'eyeBlink' shape)
+  //    close ~70 ms, hold ~30 ms, open ~120 ms; every 2.5-5 s; about 1 in 5 is a quick double blink
+  if (!isBlinking && elapsedTime >= nextBlinkTime) {
+    isBlinking = true;
+    blinkStartTime = elapsedTime;
+    const double = Math.random() < 0.2;
+    nextBlinkTime = double ? elapsedTime + 0.40 : elapsedTime + 2.5 + Math.random() * 2.5;
+  }
+  if (isBlinking) {
+    const t = elapsedTime - blinkStartTime;
+    const ease = (x) => x * x * (3 - 2 * x);
+    if (t < 0.07) blinkVal = ease(t / 0.07);
+    else if (t < 0.10) blinkVal = 1;
+    else if (t < 0.22) blinkVal = 1 - ease((t - 0.10) / 0.12);
+    else { blinkVal = 0; isBlinking = false; }
+  }
+  for (const m of morphMeshes) {
+    const bi = m.morphTargetDictionary[BLINK_SHAPE];
+    if (bi !== undefined) m.morphTargetInfluences[bi] = blinkVal;
+  }
 
-// Render Loop
-function animate() {
-  requestAnimationFrame(animate);
-  const delta = clock.getDelta();
-  if (mixer) mixer.update(delta);
-  if (controls) controls.update();
+  // 3. Natural Breathing & Organic Life Dynamics
+  const breathRate = 1.4;
+  const breathCycle = Math.sin(elapsedTime * breathRate);
 
-  updateFacialExpressions(delta);
+  // Spine breathing expansion
+  const spine = bones['mixamorig:Spine2'] || bones['mixamorig:Spine1'];
+  if (spine && initialBoneRotations[spine.name]) {
+    spine.rotation.x = initialBoneRotations[spine.name].x + breathCycle * 0.014;
+  }
+
+  // Head subtle micro-movements & mouse parallax
+  const head = bones['mixamorig:Head'];
+  if (head && initialBoneRotations['mixamorig:Head']) {
+    const init = initialBoneRotations['mixamorig:Head'];
+
+    let stateOffsetX = 0;
+    let stateOffsetY = 0;
+    let stateOffsetZ = 0;
+
+    if (currentState === 'listening') {
+      stateOffsetX = 0.035;
+      stateOffsetZ = 0.03;
+    } else if (currentState === 'active') {
+      stateOffsetX = -0.025;
+      stateOffsetY = 0.02;
+    } else if (isSpeaking || isAudioPlaying) {
+      stateOffsetX = Math.sin(elapsedTime * 6.0) * (0.015 + mouthVals[0] * 0.025);
+      stateOffsetZ = Math.cos(elapsedTime * 3.0) * 0.01;
+    }
+
+    targetHeadRotY = init.y + (mouseX * 0.15) + stateOffsetY;
+    targetHeadRotX = init.x + (mouseY * 0.08) + stateOffsetX + breathCycle * 0.006;
+    const targetHeadRotZ = init.z + stateOffsetZ;
+
+    head.rotation.y += (targetHeadRotY - head.rotation.y) * 0.06;
+    head.rotation.x += (targetHeadRotX - head.rotation.x) * 0.06;
+    head.rotation.z += (targetHeadRotZ - head.rotation.z) * 0.06;
+  }
 
   renderer.render(scene, camera);
 }
