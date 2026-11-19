@@ -324,8 +324,7 @@ async function loadAnimationClips() {
   const loader = new GLTFLoader();
   const cacheBust = Date.now();
   const animNames = [
-    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` },
-    { key: 'waving', file: `../final/anims/Waving.glb?t=${cacheBust}` }
+    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` }
   ];
 
   for (const anim of animNames) {
@@ -595,7 +594,7 @@ function handleAgentEvent(msg) {
           statusIndicator.classList.add('online');
         }
         agentStatus.textContent = data.text || "Listening...";
-        if (animations.idle && !isAudioPlaying && currentAction !== animations.waving) {
+        if (animations.idle && !isAudioPlaying) {
           crossFadeToAction(animations.idle, 0.6);
         }
       } else if (data.state === "idle") {
@@ -700,17 +699,10 @@ function playNextAudioInQueue() {
   }
   agentStatus.textContent = "Veda Speaking...";
 
-  // Only perform gentle wave for greeting/namaste; keep avatar strictly in natural idle posture otherwise
+  // Natural idle posture at all times without distorted arm gestures; warm smile for greetings
   const textLower = (item.text || '').toLowerCase();
   if (textLower.includes('namaste') || textLower.includes('pranam') || textLower.includes('welcome') || textLower.includes('hello') || textLower.includes('swagat') || textLower.startsWith('hi')) {
-    if (animations.waving) {
-      crossFadeToAction(animations.waving, 0.25);
-    }
-    targetSmile = 0.22;
-  } else {
-    if (animations.idle && currentAction !== animations.idle && currentAction !== animations.waving) {
-      crossFadeToAction(animations.idle, 0.5);
-    }
+    targetSmile = 0.32;
   }
 
   source.onended = () => {
@@ -772,14 +764,9 @@ async function speakText(text, gestureKey = null) {
     gestureSwitchInterval = null;
   }
 
-  let startAction = null;
-  if (gestureKey === 'waving' || gestureKey === 'namaste') {
-    startAction = animations.waving;
-  } else if (animations.idle) {
-    startAction = animations.idle;
+  if (animations.idle && currentAction !== animations.idle) {
+    crossFadeToAction(animations.idle, 0.4);
   }
-
-  if (startAction) crossFadeToAction(startAction, 0.25);
   targetSmile = 0.20;
 
   if ('speechSynthesis' in window) {
@@ -1036,21 +1023,7 @@ if (btnCameraBody) btnCameraBody.addEventListener('click', setCameraPortrait);
 
 if (btnWave) {
   btnWave.addEventListener('click', () => {
-    if (animations.waving) crossFadeToAction(animations.waving, 0.25);
-    handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!", 'waving');
-  });
-}
-
-if (btnGestureExplain) {
-  btnGestureExplain.addEventListener('click', () => {
-    handleUserPrompt("Can you explain how affective computing, bio-sensing, and 3D avatars work at HTI Lab?");
-  });
-}
-
-if (btnGestureWelcome) {
-  btnGestureWelcome.addEventListener('click', () => {
-    if (animations.waving) crossFadeToAction(animations.waving, 0.25);
-    handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!", 'waving');
+    handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!");
   });
 }
 
@@ -1077,11 +1050,7 @@ if (btnToggleVeda) {
 quickChips.forEach(chip => {
   chip.addEventListener('click', () => {
     const text = chip.getAttribute('data-text');
-    let gesture = null;
-    if (text.includes('Namaste') || text.includes('Welcome') || text.includes('Hello')) {
-      gesture = 'waving';
-    }
-    handleUserPrompt(text, gesture);
+    handleUserPrompt(text);
   });
 });
 
