@@ -33,15 +33,7 @@ let mixer = null;
 let clock = new THREE.Clock();
 
 const animations = {
-  idle: null,
-  namaste: null,
-  talking: null,
-  talking_explain: null,
-  talking_bothhands: null,
-  talking_welcome: null,
-  thinking: null,
-  waving: null,
-  thankful: null
+  idle: null
 };
 
 let currentAction = null;
@@ -320,7 +312,17 @@ async function applyLoadedGLTF(gltf) {
 function setMorphInfluence(targetName, value) {
   for (let i = 0; i < facialMeshes.length; i++) {
     const mesh = facialMeshes[i];
-    const idx = mesh.morphTargetDictionary[targetName];
+    if (!mesh.morphTargetDictionary || !mesh.morphTargetInfluences) continue;
+    let idx = mesh.morphTargetDictionary[targetName];
+    if (idx === undefined) {
+      const lower = targetName.toLowerCase();
+      for (const k in mesh.morphTargetDictionary) {
+        if (k.toLowerCase() === lower) {
+          idx = mesh.morphTargetDictionary[k];
+          break;
+        }
+      }
+    }
     if (idx !== undefined) {
       mesh.morphTargetInfluences[idx] = value;
     }
@@ -331,15 +333,7 @@ async function loadAnimationClips() {
   const loader = new GLTFLoader();
   const cacheBust = Date.now();
   const animNames = [
-    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` },
-    { key: 'namaste', file: `../final/anims/Namaste.glb?t=${cacheBust}` },
-    { key: 'talking', file: `../final/anims/Talking.glb?t=${cacheBust}` },
-    { key: 'talking_explain', file: `../final/anims/Talking_Explain.glb?t=${cacheBust}` },
-    { key: 'talking_bothhands', file: `../final/anims/Talking_BothHands.glb?t=${cacheBust}` },
-    { key: 'talking_welcome', file: `../final/anims/Talking_Welcome.glb?t=${cacheBust}` },
-    { key: 'thinking', file: `../final/anims/Thinking.glb?t=${cacheBust}` },
-    { key: 'waving', file: `../final/anims/Waving.glb?t=${cacheBust}` },
-    { key: 'thankful', file: `../final/anims/Thankful.glb?t=${cacheBust}` }
+    { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` }
   ];
 
   for (const anim of animNames) {
@@ -352,26 +346,13 @@ async function loadAnimationClips() {
                 
         clip = retargetClip(clip, currentModel);
         const action = mixer.clipAction(clip);
-        
-        if (anim.key === 'idle' || anim.key.startsWith('talking')) {
-          action.setLoop(THREE.LoopRepeat);
-        } else {
-          action.setLoop(THREE.LoopOnce);
-          action.clampWhenFinished = true;
-        }
-
+        action.setLoop(THREE.LoopRepeat);
         animations[anim.key] = action;
       }
     } catch (err) {
       console.warn(`Could not load animation ${anim.key}:`, err);
     }
   }
-
-  mixer.addEventListener('finished', (e) => {
-    if (e.action !== animations.idle && animations.idle) {
-      crossFadeToAction(animations.idle, 0.6);
-    }
-  });
 
   if (!currentAction && animations.idle) {
     playAction(animations.idle);
@@ -689,7 +670,7 @@ function playNextAudioInQueue() {
     }
     agentStatus.textContent = "Agent Ready • Listening";
     if (animations.idle && currentAction !== animations.idle) {
-      crossFadeToAction(animations.idle, 0.6);
+      playAction(animations.idle);
     }
     return;
   }
@@ -707,31 +688,15 @@ function playNextAudioInQueue() {
   }
   agentStatus.textContent = "Veda Speaking...";
 
-  // Expressive conversational gestures from HTI_Avatar_Agent 2
+  // Warm smile on greeting
   const textLower = (item.text || '').toLowerCase();
-  let gestureToPlay = null;
-  if (textLower.includes('namaste') || textLower.includes('pranam')) {
-    gestureToPlay = animations.namaste || animations.waving;
-    targetSmile = 0.32;
-  } else if (textLower.includes('welcome') || textLower.includes('swagat') || textLower.includes('hello') || textLower.startsWith('hi')) {
-    gestureToPlay = animations.waving || animations.talking_welcome;
+  if (textLower.includes('namaste') || textLower.includes('pranam') || textLower.includes('welcome') || textLower.includes('hello') || textLower.startsWith('hi')) {
     targetSmile = 0.28;
-  } else if (textLower.includes('explain') || textLower.includes('research') || textLower.includes('technology') || textLower.includes('demo')) {
-    gestureToPlay = animations.talking_explain;
-  } else {
-    const talkingPool = [
-      animations.talking_explain,
-      animations.talking_bothhands,
-      animations.talking_welcome,
-      animations.talking
-    ].filter(Boolean);
-    if (talkingPool.length > 0) {
-      gestureToPlay = talkingPool[Math.floor(Math.random() * talkingPool.length)];
-    }
   }
 
-  if (gestureToPlay) {
-    crossFadeToAction(gestureToPlay, 0.25);
+  // Ensure idle posture is active (no distorted arm gestures)
+  if (animations.idle && (!currentAction || currentAction !== animations.idle)) {
+    playAction(animations.idle);
   }
 
   if (activeAudioElement) {
@@ -741,21 +706,6 @@ function playNextAudioInQueue() {
 
   const audio = new Audio(item.dataUrl);
   activeAudioElement = audio;
-
-  if (wsAudioCtx) {
-    try {
-      if (wsAudioCtx.state === 'suspended') {
-        wsAudioCtx.resume();
-      }
-      if (wsAudioAnalyser) {
-        const source = wsAudioCtx.createMediaElementSource(audio);
-        source.connect(wsAudioAnalyser);
-        wsAudioAnalyser.connect(wsAudioCtx.destination);
-      }
-    } catch (e) {
-      // Audio element plays directly through default audio destination
-    }
-  }
 
   audio.onended = () => {
     activeAudioElement = null;
@@ -769,7 +719,7 @@ function playNextAudioInQueue() {
   };
 
   audio.play().catch((err) => {
-    console.warn("[WebAudio] Autoplay blocked, unlocking on gesture:", err);
+    console.warn("[WebAudio] Autoplay blocked, unlocking on click:", err);
     setTimeout(() => {
       activeAudioElement = null;
       playNextAudioInQueue();
@@ -898,7 +848,7 @@ async function speakText(text, gestureKey = null) {
 function updateFacialExpressions(delta) {
   if (facialMeshes.length === 0) return;
 
-  // 1. Natural Organic Eye Blinking
+  // 1. Natural Organic Eye Blinking (Exact HTI_Avatar_Agent 2 Physics)
   blinkTimer -= delta;
   if (blinkTimer <= 0 && !isBlinking) {
     isBlinking = true;
@@ -912,11 +862,13 @@ function updateFacialExpressions(delta) {
       setMorphInfluence('eyeBlinkLeft', 0);
       setMorphInfluence('eyeBlinkRight', 0);
       setMorphInfluence('eyesClosed', 0);
+      setMorphInfluence('blink', 0);
     } else {
       const blinkWeight = Math.sin(blinkProgress * Math.PI);
       setMorphInfluence('eyeBlinkLeft', blinkWeight);
       setMorphInfluence('eyeBlinkRight', blinkWeight);
       setMorphInfluence('eyesClosed', blinkWeight);
+      setMorphInfluence('blink', blinkWeight);
     }
   }
 
@@ -1081,24 +1033,33 @@ if (btnCameraBody) btnCameraBody.addEventListener('click', setCameraPortrait);
 
 if (btnWave) {
   btnWave.addEventListener('click', () => {
-    if (animations.waving) crossFadeToAction(animations.waving, 0.25);
+    targetSmile = 0.28;
     handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!");
   });
 }
 
 if (btnGestureExplain) {
   btnGestureExplain.addEventListener('click', () => {
-    if (animations.talking_explain) crossFadeToAction(animations.talking_explain, 0.25);
     handleUserPrompt("Can you explain how affective computing, bio-sensing, and 3D avatars work at HTI Lab?");
   });
 }
 
 if (btnGestureWelcome) {
   btnGestureWelcome.addEventListener('click', () => {
-    if (animations.talking_welcome) crossFadeToAction(animations.talking_welcome, 0.25);
+    targetSmile = 0.28;
     handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!");
   });
 }
+
+// Global user interaction unlock for browser audio
+function unlockAudioPlayback() {
+  if (wsAudioCtx && wsAudioCtx.state === 'suspended') {
+    wsAudioCtx.resume();
+  }
+}
+window.addEventListener('click', unlockAudioPlayback);
+window.addEventListener('keydown', unlockAudioPlayback);
+window.addEventListener('touchstart', unlockAudioPlayback);
 
 if (btnToggleVeda) {
   btnToggleVeda.addEventListener('click', () => {
