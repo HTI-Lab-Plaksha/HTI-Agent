@@ -154,10 +154,10 @@ async function initEngine() {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
-    controls.target.set(0, 1.35, 0);
+    controls.target.set(0, 1.48, 0);
     controls.maxPolarAngle = Math.PI / 2 + 0.1;
     controls.minDistance = 0.6;
-    controls.maxDistance = 4.5;
+    controls.maxDistance = 1.35;
 
     // Black & White High-Contrast Studio Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 1.3);
@@ -325,14 +325,7 @@ async function loadAnimationClips() {
   const cacheBust = Date.now();
   const animNames = [
     { key: 'idle', file: `../final/anims/Idle.glb?t=${cacheBust}` },
-    { key: 'namaste', file: `../final/anims/Namaste.glb?t=${cacheBust}` },
-    { key: 'talking', file: `../final/anims/Talking.glb?t=${cacheBust}` },
-    { key: 'talking_explain', file: `../final/anims/Talking_Explain.glb?t=${cacheBust}` },
-    { key: 'talking_bothhands', file: `../final/anims/Talking_BothHands.glb?t=${cacheBust}` },
-    { key: 'talking_welcome', file: `../final/anims/Talking_Welcome.glb?t=${cacheBust}` },
-    { key: 'thinking', file: `../final/anims/Thinking.glb?t=${cacheBust}` },
-    { key: 'waving', file: `../final/anims/Waving.glb?t=${cacheBust}` },
-    { key: 'thankful', file: `../final/anims/Thankful.glb?t=${cacheBust}` }
+    { key: 'waving', file: `../final/anims/Waving.glb?t=${cacheBust}` }
   ];
 
   for (const anim of animNames) {
@@ -361,7 +354,7 @@ async function loadAnimationClips() {
   }
 
   mixer.addEventListener('finished', (e) => {
-    if (e.action !== animations.idle && animations.idle && !isSpeaking) {
+    if (e.action !== animations.idle && animations.idle) {
       crossFadeToAction(animations.idle, 0.6);
     }
   });
@@ -471,25 +464,22 @@ function crossFadeToAction(newAction, duration = 0.25) {
   }
 }
 
-// Camera Presets
+// Camera Presets - Strictly Portrait Only
 function setCameraPortrait() {
   if (camera && controls) {
     camera.position.set(0, 1.54, 1.02);
     controls.target.set(0, 1.48, 0);
+    controls.minDistance = 0.6;
+    controls.maxDistance = 1.35;
     controls.update();
   }
-  btnCameraHead.classList.add('active');
-  btnCameraBody.classList.remove('active');
+  if (btnCameraHead) btnCameraHead.classList.add('active');
+  if (btnCameraBody) btnCameraBody.classList.remove('active');
 }
 
 function setCameraFullBody() {
-  if (camera && controls) {
-    camera.position.set(0, 1.05, 2.45);
-    controls.target.set(0, 0.88, 0);
-    controls.update();
-  }
-  btnCameraBody.classList.add('active');
-  btnCameraHead.classList.remove('active');
+  // Enforce portrait only as requested
+  setCameraPortrait();
 }
 
 // Append Chat Message
@@ -605,9 +595,7 @@ function handleAgentEvent(msg) {
           statusIndicator.classList.add('online');
         }
         agentStatus.textContent = data.text || "Listening...";
-        if (data.text === "Thinking..." && animations.thinking) {
-          crossFadeToAction(animations.thinking, 0.35);
-        } else if (animations.idle && !isAudioPlaying) {
+        if (animations.idle && !isAudioPlaying && currentAction !== animations.waving) {
           crossFadeToAction(animations.idle, 0.6);
         }
       } else if (data.state === "idle") {
@@ -712,28 +700,17 @@ function playNextAudioInQueue() {
   }
   agentStatus.textContent = "Veda Speaking...";
 
-  // Pick appropriate gesture for conversational context (strictly avoid namaste)
+  // Only perform gentle wave for greeting/namaste; keep avatar strictly in natural idle posture otherwise
   const textLower = (item.text || '').toLowerCase();
-  let gestureToPlay = null;
-  if (textLower.includes('namaste') || textLower.includes('pranam') || textLower.includes('welcome') || textLower.includes('swagat')) {
-    gestureToPlay = animations.talking_welcome;
-    targetSmile = 0.22;
-  } else if (textLower.includes('explain') || textLower.includes('research') || textLower.includes('hti') || textLower.includes('technology') || textLower.includes('project')) {
-    gestureToPlay = animations.talking_explain;
-  } else {
-    const talkingPool = [
-      animations.talking_explain,
-      animations.talking_bothhands,
-      animations.talking_welcome,
-      animations.talking
-    ].filter(Boolean);
-    if (talkingPool.length > 0) {
-      gestureToPlay = talkingPool[Math.floor(Math.random() * talkingPool.length)];
+  if (textLower.includes('namaste') || textLower.includes('pranam') || textLower.includes('welcome') || textLower.includes('hello') || textLower.includes('swagat') || textLower.startsWith('hi')) {
+    if (animations.waving) {
+      crossFadeToAction(animations.waving, 0.25);
     }
-  }
-
-  if (gestureToPlay) {
-    crossFadeToAction(gestureToPlay, 0.25);
+    targetSmile = 0.22;
+  } else {
+    if (animations.idle && currentAction !== animations.idle && currentAction !== animations.waving) {
+      crossFadeToAction(animations.idle, 0.5);
+    }
   }
 
   source.onended = () => {
@@ -795,22 +772,15 @@ async function speakText(text, gestureKey = null) {
     gestureSwitchInterval = null;
   }
 
-  const talkingGestures = [
-    animations.talking_explain,
-    animations.talking_bothhands,
-    animations.talking_welcome,
-    animations.talking
-  ].filter(Boolean);
-
   let startAction = null;
-  if (gestureKey && animations[gestureKey]) {
-    startAction = animations[gestureKey];
-  } else if (talkingGestures.length > 0) {
-    startAction = talkingGestures[Math.floor(Math.random() * talkingGestures.length)];
+  if (gestureKey === 'waving' || gestureKey === 'namaste') {
+    startAction = animations.waving;
+  } else if (animations.idle) {
+    startAction = animations.idle;
   }
 
   if (startAction) crossFadeToAction(startAction, 0.25);
-  targetSmile = gestureKey === 'namaste' ? 0.32 : 0.18;
+  targetSmile = 0.20;
 
   if ('speechSynthesis' in window) {
     if (currentUtterance) {
@@ -891,16 +861,18 @@ function updateFacialExpressions(delta) {
       setMorphInfluence('eyeBlinkLeft', 0);
       setMorphInfluence('eyeBlinkRight', 0);
       setMorphInfluence('eyesClosed', 0);
+      setMorphInfluence('blink', 0);
     } else {
       const blinkWeight = Math.sin(blinkProgress * Math.PI);
       setMorphInfluence('eyeBlinkLeft', blinkWeight);
       setMorphInfluence('eyeBlinkRight', blinkWeight);
       setMorphInfluence('eyesClosed', blinkWeight);
+      setMorphInfluence('blink', blinkWeight);
     }
   }
 
   // 2. High-Fidelity Speech Mouth Cadence driven by Audio Analyser or Procedural Syllables
-  if (isSpeaking) {
+  if (isSpeaking || isAudioPlaying) {
     speechElapsed += delta;
     let mouthOpening = 0;
 
@@ -912,23 +884,27 @@ function updateFacialExpressions(delta) {
         sum += wsAudioDataArray[i];
       }
       const avg = sum / (maxBin - 4);
-      if (avg > 18) {
-        mouthOpening = Math.min(0.42, (avg / 120.0) * 0.42);
+      if (avg > 12) {
+        mouthOpening = Math.min(0.55, (avg / 100.0) * 0.55);
       } else {
-        mouthOpening = 0;
+        // Procedural syllable cadence fallback during quieter syllables
+        const syllableFreq = 3.6;
+        const phase = (speechElapsed * syllableFreq * Math.PI * 2) % (Math.PI * 2);
+        let wave = Math.sin(phase);
+        mouthOpening = wave > 0 ? Math.pow(wave, 1.35) * 0.32 : 0;
       }
     } else {
       // Procedural syllable cadence for Web Speech API
       const syllableFreq = 3.6;
       const phase = (speechElapsed * syllableFreq * Math.PI * 2) % (Math.PI * 2);
       let wave = Math.sin(phase);
-      mouthOpening = wave > 0 ? Math.pow(wave, 1.35) * 0.35 : 0;
+      mouthOpening = wave > 0 ? Math.pow(wave, 1.35) * 0.42 : 0;
     }
 
     targetJawOpen = mouthOpening;
-    targetVisemeAA = mouthOpening * 0.65;
+    targetVisemeAA = mouthOpening * 0.70;
     targetVisemeO = mouthOpening * 0.35;
-    targetSmile = 0.16;
+    targetSmile = 0.18;
   } else {
     targetJawOpen = 0;
     targetVisemeAA = 0;
@@ -937,7 +913,7 @@ function updateFacialExpressions(delta) {
   }
 
   // Smooth 60FPS dampening / interpolation
-  const lerpSpeed = isSpeaking ? 16.0 : 12.0;
+  const lerpSpeed = (isSpeaking || isAudioPlaying) ? 18.0 : 12.0;
   const t = Math.min(1.0, delta * lerpSpeed);
   
   currentJawOpen = THREE.MathUtils.lerp(currentJawOpen, targetJawOpen, t);
@@ -945,7 +921,7 @@ function updateFacialExpressions(delta) {
   currentVisemeO = THREE.MathUtils.lerp(currentVisemeO, targetVisemeO, t);
   currentSmile = THREE.MathUtils.lerp(currentSmile, targetSmile, t);
 
-  // Apply to all facial meshes synchronously (Head_Mesh, Teeth_Mesh, Tongue_Mesh)
+  // Apply to all facial meshes synchronously
   setMorphInfluence('jawOpen', currentJawOpen);
   setMorphInfluence('mouthOpen', currentJawOpen * 0.85);
   setMorphInfluence('viseme_aa', currentVisemeAA);
@@ -1055,23 +1031,28 @@ chatForm.addEventListener('submit', (e) => {
   handleUserPrompt(userPromptInput.value);
 });
 
-btnCameraHead.addEventListener('click', setCameraPortrait);
-btnCameraBody.addEventListener('click', setCameraFullBody);
+if (btnCameraHead) btnCameraHead.addEventListener('click', setCameraPortrait);
+if (btnCameraBody) btnCameraBody.addEventListener('click', setCameraPortrait);
 
-btnWave.addEventListener('click', () => {
-  if (animations.talking_welcome) crossFadeToAction(animations.talking_welcome, 0.25);
-  handleUserPrompt("Welcome to the Human Technology Interaction Lab at Plaksha University!", 'talking_welcome');
-});
+if (btnWave) {
+  btnWave.addEventListener('click', () => {
+    if (animations.waving) crossFadeToAction(animations.waving, 0.25);
+    handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!", 'waving');
+  });
+}
 
-btnGestureExplain.addEventListener('click', () => {
-  if (animations.talking_explain) crossFadeToAction(animations.talking_explain, 0.25);
-  handleUserPrompt("Can you explain how affective computing, bio-sensing, and 3D avatars work at HTI Lab?", 'talking_explain');
-});
+if (btnGestureExplain) {
+  btnGestureExplain.addEventListener('click', () => {
+    handleUserPrompt("Can you explain how affective computing, bio-sensing, and 3D avatars work at HTI Lab?");
+  });
+}
 
-btnGestureWelcome.addEventListener('click', () => {
-  if (animations.talking_welcome) crossFadeToAction(animations.talking_welcome, 0.25);
-  handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!", 'talking_welcome');
-});
+if (btnGestureWelcome) {
+  btnGestureWelcome.addEventListener('click', () => {
+    if (animations.waving) crossFadeToAction(animations.waving, 0.25);
+    handleUserPrompt("A warm welcome to everyone visiting our HTI Lab today!", 'waving');
+  });
+}
 
 if (btnToggleVeda) {
   btnToggleVeda.addEventListener('click', () => {
@@ -1097,9 +1078,9 @@ quickChips.forEach(chip => {
   chip.addEventListener('click', () => {
     const text = chip.getAttribute('data-text');
     let gesture = null;
-    if (text.includes('Namaste')) gesture = 'namaste';
-    else if (text.includes('Explain') || text.includes('explain')) gesture = 'talking_explain';
-    else if (text.includes('Welcome') || text.includes('welcome')) gesture = 'talking_welcome';
+    if (text.includes('Namaste') || text.includes('Welcome') || text.includes('Hello')) {
+      gesture = 'waving';
+    }
     handleUserPrompt(text, gesture);
   });
 });
