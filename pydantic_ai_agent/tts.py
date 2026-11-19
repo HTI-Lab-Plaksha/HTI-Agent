@@ -163,10 +163,10 @@ class VoiceService:
 
         except Exception as e:
             print(f"[TTS] Error during edge-tts playback: {e}")
-            # Fallback to macOS native TTS so conversation never breaks
+            # Ensure we never spawn a default male voice
             try:
-                print("[TTS] Falling back to macOS speech synthesis...")
-                subprocess.run(["say", text], check=True)
+                # If native fallback is attempted, strictly use female voice
+                subprocess.run(["say", "-v", "Samantha", text], check=False)
             except Exception as fallback_err:
                 print(f"[TTS] Fallback error: {fallback_err}")
         finally:

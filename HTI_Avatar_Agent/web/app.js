@@ -712,13 +712,10 @@ function playNextAudioInQueue() {
   }
   agentStatus.textContent = "Veda Speaking...";
 
-  // Pick appropriate gesture for conversational context
+  // Pick appropriate gesture for conversational context (strictly avoid namaste)
   const textLower = (item.text || '').toLowerCase();
   let gestureToPlay = null;
-  if (textLower.includes('namaste') || textLower.includes('pranam')) {
-    gestureToPlay = animations.namaste;
-    targetSmile = 0.32;
-  } else if (textLower.includes('welcome') || textLower.includes('swagat')) {
+  if (textLower.includes('namaste') || textLower.includes('pranam') || textLower.includes('welcome') || textLower.includes('swagat')) {
     gestureToPlay = animations.talking_welcome;
     targetSmile = 0.22;
   } else if (textLower.includes('explain') || textLower.includes('research') || textLower.includes('hti') || textLower.includes('technology') || textLower.includes('project')) {
@@ -777,6 +774,11 @@ function handleUserPrompt(text, gestureKey = null) {
 async function speakText(text, gestureKey = null) {
   if (!text || !text.trim()) return;
 
+  // Never use browser client speech synthesis if backend is active and connected
+  if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+    return;
+  }
+
   const sessionId = ++activeSpeechSessionId;
 
   const statusIndicator = document.querySelector('.status-indicator');
@@ -825,10 +827,21 @@ async function speakText(text, gestureKey = null) {
     currentUtterance = utterance;
 
     const voices = window.speechSynthesis.getVoices();
-    const voice = voices.find(v => v.lang.includes('en-IN') || v.name.includes('India')) 
-               || voices.find(v => v.lang.includes('en') && v.name.toLowerCase().includes('female'))
-               || voices[0];
-    if (voice) utterance.voice = voice;
+    // Strictly select confirmed female voices - NEVER fall back to male voice (like Alex)
+    const voice = voices.find(v => {
+      const n = v.name.toLowerCase();
+      return n.includes('female') || n.includes('samantha') || n.includes('victoria') ||
+             n.includes('karen') || n.includes('moira') || n.includes('tessa') ||
+             n.includes('zira') || (n.includes('google') && (n.includes('uk english female') || n.includes('hi-in') || n.includes('en-in')));
+    });
+
+    if (!voice) {
+      console.warn("[TTS] No confirmed female voice found in browser. Skipping voice synthesis to avoid male voice.");
+      const approxDuration = Math.max(2.5, text.length * 0.06);
+      setTimeout(stopSpeaking, approxDuration * 1000);
+      return;
+    }
+    utterance.voice = voice;
 
     utterance.rate = 0.98;
     utterance.pitch = 1.04;
@@ -1046,8 +1059,8 @@ btnCameraHead.addEventListener('click', setCameraPortrait);
 btnCameraBody.addEventListener('click', setCameraFullBody);
 
 btnWave.addEventListener('click', () => {
-  if (animations.namaste) crossFadeToAction(animations.namaste, 0.25);
-  handleUserPrompt("Namaste! Welcome to the Human Technology Interaction Lab at Plaksha University!", 'namaste');
+  if (animations.talking_welcome) crossFadeToAction(animations.talking_welcome, 0.25);
+  handleUserPrompt("Welcome to the Human Technology Interaction Lab at Plaksha University!", 'talking_welcome');
 });
 
 btnGestureExplain.addEventListener('click', () => {
